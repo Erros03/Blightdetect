@@ -1,0 +1,6 @@
+{
+  "name": "BlightDetect+ Tomato Vision Stream",
+  "description": "Real-time tomato detection and blight monitoring vision system with continuous live camera stream, centroid/IoU tracking, yield statistics, and session history.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
