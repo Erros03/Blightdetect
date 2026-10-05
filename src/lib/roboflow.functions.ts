@@ -1,5 +1,5 @@
 /**
- * Client-Side YOLO/Roboflow inference function
+ * Client-Side YOLOv11/Roboflow inference function
  * Calls the secure server-side proxy to keep API keys hidden
  */
 import type { RoboflowPrediction } from '../types.ts';

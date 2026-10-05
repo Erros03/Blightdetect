@@ -97,11 +97,23 @@ export function useDetectionSession() {
   // Handle a new unique tomato detected by the tracker
   const recordUniqueTomato = useCallback((event: TomatoDetectionEvent) => {
     setCounts((prev) => {
+      const isAccepted = event.sortingAction === 'ACCEPT';
+      const isRejected = event.sortingAction === 'REJECT_QUARANTINE';
+      const isManual = event.sortingAction === 'MANUAL_REVIEW';
+
       const updated: TomatoSessionCounts = {
         ripe: prev.ripe + (event.ripeness === 'ripe' ? 1 : 0),
         unripe: prev.unripe + (event.ripeness === 'unripe' ? 1 : 0),
         blight: prev.blight + (event.ripeness === 'blight' ? 1 : 0),
         total: prev.total + 1,
+        accepted: (prev.accepted ?? 0) + (isAccepted ? 1 : 0),
+        rejected: (prev.rejected ?? 0) + (isRejected ? 1 : 0),
+        manualReview: (prev.manualReview ?? 0) + (isManual ? 1 : 0),
+        gradeA: (prev.gradeA ?? 0) + (event.qualityGrade === 'Grade A' ? 1 : 0),
+        gradeB: (prev.gradeB ?? 0) + (event.qualityGrade === 'Grade B' ? 1 : 0),
+        gradeC: (prev.gradeC ?? 0) + (event.qualityGrade === 'Grade C' ? 1 : 0),
+        earlyBlight: (prev.earlyBlight ?? 0) + (event.blightType === 'early_blight' ? 1 : 0),
+        lateBlight: (prev.lateBlight ?? 0) + (event.blightType === 'late_blight' ? 1 : 0),
       };
       countsRef.current = updated;
 

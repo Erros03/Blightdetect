@@ -48,7 +48,7 @@ export function formatTomatoForFirebase(event: {
   let size: 'Small' | 'Medium' | 'Large' = 'Medium';
   if (event.size) {
     const s = event.size.toLowerCase();
-    size = s === 'small' ? 'Small' : s === 'large' || s === 'extra-large' ? 'Large' : 'Medium';
+    size = s === 'small' ? 'Small' : s === 'large' ? 'Large' : 'Medium';
   } else {
     size = estimatedDiameterMm < 52 ? 'Small' : estimatedDiameterMm < 72 ? 'Medium' : 'Large';
   }

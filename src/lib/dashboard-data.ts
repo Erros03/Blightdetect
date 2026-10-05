@@ -32,17 +32,22 @@ export function calculateMetrics(
     ? Math.max(0, Math.min(100, Math.round(100 - (blightRatePercent * 2.5) - ((currentCounts.unripe / total) * 20))))
     : 100;
 
-  // Average weight per tomato is ~140g (0.14 kg) for medium, 90g for small, 200g for large
+  // Commercial slicing standard weight basis:
+  // Medium: 60-75mm (2.5-3.0 in), 110-170g (4-6 oz)
+  // Small: <60mm (<2.5 in), <110g (<4 oz)
+  // Large: >75mm (>3.0 in), >170g (>6 oz)
   let estimatedYieldKg = 0;
   if (recentEvents.length > 0) {
     estimatedYieldKg = recentEvents.reduce((acc, ev) => {
-      if (ev.size === 'small') return acc + 0.09;
-      if (ev.size === 'medium') return acc + 0.14;
-      if (ev.size === 'large') return acc + 0.19;
-      return acc + 0.25; // extra large
+      if (ev.weightGrams) {
+        return acc + ev.weightGrams / 1000;
+      }
+      if (ev.size === 'small') return acc + 0.085;
+      if (ev.size === 'medium') return acc + 0.140;
+      return acc + 0.205;
     }, 0);
   } else {
-    estimatedYieldKg = total * 0.14;
+    estimatedYieldKg = total * 0.14; // Default medium slicing tomato basis (~140g)
   }
   estimatedYieldKg = Number(estimatedYieldKg.toFixed(2));
 
@@ -72,19 +77,17 @@ export function getSizeDistribution(events: TomatoDetectionEvent[]) {
     small: 0,
     medium: 0,
     large: 0,
-    'extra-large': 0,
   };
 
   events.forEach((e) => {
     if (e.size in dist) {
-      dist[e.size]++;
+      dist[e.size as keyof typeof dist]++;
     }
   });
 
   return [
-    { name: 'Small (<50mm)', count: dist.small, color: '#f59e0b' },
-    { name: 'Medium (50-70mm)', count: dist.medium, color: '#10b981' },
-    { name: 'Large (70-85mm)', count: dist.large, color: '#3b82f6' },
-    { name: 'Extra Large (>85mm)', count: dist['extra-large'], color: '#8b5cf6' },
+    { name: 'Small (<60mm / <4 oz)', count: dist.small, color: '#f59e0b' },
+    { name: 'Medium (60-75mm / 4-6 oz)', count: dist.medium, color: '#10b981' },
+    { name: 'Large (>75mm / >6 oz)', count: dist.large, color: '#3b82f6' },
   ];
 }

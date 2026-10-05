@@ -112,7 +112,7 @@ function AppContent() {
         {currentRoute === 'history' && <HistoryRoute />}
       </main>
 
-      {/* Arduino & IoT Actuator Modal */}
+      {/* Arduino & IoT Size Sorter Modal */}
       <ArduinoConnectorModal
         isOpen={isArduinoModalOpen}
         onClose={() => setIsArduinoModalOpen(false)}
@@ -134,7 +134,7 @@ function AppContent() {
           <div className="flex items-center space-x-4 text-[11px] text-stone-500 dark:text-stone-400">
             <span>Centroid Multi-Object Tracker</span>
             <span>•</span>
-            <span>YOLOv8 Inference Engine</span>
+            <span>YOLOv11 Inference Engine</span>
             <span>•</span>
             <span>Firestore History Storage</span>
           </div>

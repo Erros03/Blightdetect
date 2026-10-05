@@ -131,7 +131,7 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-base font-bold text-white">Roboflow YOLO Stream Inspector</h3>
+                <h3 className="text-base font-bold text-white">Roboflow YOLOv11 Stream Inspector</h3>
                 <span className="inline-flex items-center rounded-full bg-emerald-950/80 px-2 py-0.5 text-[11px] font-semibold text-emerald-400 border border-emerald-800/60">
                   <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                   Active Model
@@ -155,7 +155,7 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
           <div className="flex items-center space-x-2 text-emerald-300">
             <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
             <span>
-              <strong>Roboflow Connected:</strong> Requests route to your hosted YOLO model with <strong>version /1</strong> enforced.
+              <strong>Roboflow Connected:</strong> Requests route to your hosted YOLOv11 model with <strong>version /1</strong> enforced.
             </span>
           </div>
           <span className="text-[11px] font-mono text-emerald-400/80 bg-emerald-900/40 px-2 py-0.5 rounded">
@@ -396,7 +396,7 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
                 <div className="pr-4">
                   <div className="text-xs font-bold text-white">Heuristic Color Fallback</div>
                   <div className="text-[11px] text-stone-400 mt-0.5 leading-normal">
-                    When disabled, only genuine Roboflow YOLO detections are counted. Prevents random red or green background objects from triggering false detections.
+                    When disabled, only genuine Roboflow YOLOv11 detections are counted. Prevents random red or green background objects from triggering false detections.
                   </div>
                 </div>
                 <button

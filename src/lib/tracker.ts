@@ -15,6 +15,12 @@ import type {
   TomatoRipeness,
   TomatoSizeClass,
 } from '../types.ts';
+import {
+  evaluateSortingAction,
+  determineQualityGrade,
+  classifyBlightPathology,
+  calculatePostHarvestMetrics,
+} from './post-harvest.ts';
 
 export function parseRipeness(className: string): TomatoRipeness {
   const lower = className.toLowerCase();
@@ -27,17 +33,47 @@ export function parseRipeness(className: string): TomatoRipeness {
   return 'ripe';
 }
 
-export function estimateTomatoSize(width: number, height: number): { size: TomatoSizeClass; diameterMm: number } {
+export function estimateTomatoSize(
+  width: number,
+  height: number,
+  mmPerPixel = 0.35
+): {
+  size: TomatoSizeClass;
+  diameterMm: number;
+  weightGrams: number;
+  weightOz: number;
+} {
   const avgDimPx = (width + height) / 2;
-  const estimatedMm = Math.round(Math.max(30, Math.min(110, avgDimPx * 0.55)));
+  const estimatedMm = Math.round(Math.max(25, Math.min(120, avgDimPx * mmPerPixel)));
   
+  // Standard slicing tomato commercial calibration:
+  // Medium: 2.5 - 3.0 inches (60 - 75mm), 4 - 6 oz (110 - 170g)
+  // Small: < 2.5 inches (< 60mm), < 4 oz (< 110g)
+  // Large: > 3.0 inches (> 75mm), > 6 oz (> 170g)
   let size: TomatoSizeClass = 'medium';
-  if (estimatedMm < 50) size = 'small';
-  else if (estimatedMm <= 70) size = 'medium';
-  else if (estimatedMm <= 85) size = 'large';
-  else size = 'extra-large';
+  if (estimatedMm < 60) size = 'small';
+  else if (estimatedMm <= 75) size = 'medium';
+  else size = 'large';
 
-  return { size, diameterMm: estimatedMm };
+  // Realistic weight estimation based on oblate spheroid geometry calibrated to 110-170g at 60-75mm
+  let weightGrams: number;
+  if (size === 'small') {
+    // 25mm to 59mm maps proportionally to ~40g - 109g
+    const factor = Math.max(0, (estimatedMm - 25) / (59 - 25));
+    weightGrams = Math.round(40 + factor * 69);
+  } else if (size === 'medium') {
+    // 60mm to 75mm maps to 110g - 170g (4 - 6 oz)
+    const factor = (estimatedMm - 60) / (75 - 60);
+    weightGrams = Math.round(110 + factor * 60);
+  } else {
+    // > 75mm maps to > 170g (up to ~280g at 120mm)
+    const factor = Math.min(1, (estimatedMm - 75) / (120 - 75));
+    weightGrams = Math.round(171 + factor * 109);
+  }
+
+  const weightOz = Number((weightGrams * 0.035274).toFixed(1));
+
+  return { size, diameterMm: estimatedMm, weightGrams, weightOz };
 }
 
 export function calculateIoU(
@@ -201,6 +237,16 @@ export class TomatoTracker {
       track.confidence = pred.confidence;
       track.class = pred.class;
       track.ripeness = predRipeness;
+      const sizeEst = estimateTomatoSize(track.bbox.width, track.bbox.height);
+      track.diameterMm = sizeEst.diameterMm;
+      track.weightGrams = sizeEst.weightGrams;
+      track.weightOz = sizeEst.weightOz;
+      if (!track.sortingAction) {
+        track.sortingAction = evaluateSortingAction(predRipeness, pred.confidence);
+      }
+      if (!track.qualityGrade) {
+        track.qualityGrade = determineQualityGrade(predRipeness, pred.confidence);
+      }
       track.lastSeen = now;
       track.lostFrames = 0;
       track.framesVisible += 1;
@@ -231,8 +277,27 @@ export class TomatoTracker {
 
         if (shouldCount) {
           track.counted = true;
-          const { size, diameterMm } = estimateTomatoSize(track.bbox.width, track.bbox.height);
+          const { size, diameterMm, weightGrams, weightOz } = estimateTomatoSize(track.bbox.width, track.bbox.height);
           track.diameterMm = diameterMm;
+          track.weightGrams = weightGrams;
+          track.weightOz = weightOz;
+
+          const pathology = classifyBlightPathology(track.class, track.ripeness === 'blight' ? 0.15 : 0);
+          const sortingAction = evaluateSortingAction(track.ripeness, track.confidence);
+          const qualityGrade = determineQualityGrade(track.ripeness, track.confidence, pathology.severity);
+          const postHarvest = calculatePostHarvestMetrics(
+            track.ripeness,
+            track.confidence,
+            size,
+            pathology.type,
+            pathology.severity
+          );
+
+          track.blightType = pathology.type;
+          track.severity = pathology.severity;
+          track.sortingAction = sortingAction;
+          track.qualityGrade = qualityGrade;
+          track.postHarvest = postHarvest;
 
           newlyCountedEvents.push({
             id: `tomato-evt-${Date.now()}-${track.id}`,
@@ -244,8 +309,15 @@ export class TomatoTracker {
             confidence: Number((track.confidence * 100).toFixed(1)),
             size,
             diameterMm,
+            weightGrams,
+            weightOz,
             bbox: track.bbox,
             trackId: track.id,
+            blightType: pathology.type,
+            severity: pathology.severity,
+            sortingAction,
+            qualityGrade,
+            postHarvest,
           });
         }
       }
@@ -276,7 +348,18 @@ export class TomatoTracker {
         const predCentroid = { x: pred.x, y: pred.y };
         const predBbox = { x: pred.x, y: pred.y, width: pred.width, height: pred.height };
         const predRipeness = parseRipeness(pred.class);
-        const { diameterMm } = estimateTomatoSize(predBbox.width, predBbox.height);
+        const { size, diameterMm, weightGrams, weightOz } = estimateTomatoSize(predBbox.width, predBbox.height);
+
+        const pathology = classifyBlightPathology(pred.class, predRipeness === 'blight' ? 0.15 : 0);
+        const sortingAction = evaluateSortingAction(predRipeness, pred.confidence);
+        const qualityGrade = determineQualityGrade(predRipeness, pred.confidence, pathology.severity);
+        const postHarvest = calculatePostHarvestMetrics(
+          predRipeness,
+          pred.confidence,
+          size,
+          pathology.type,
+          pathology.severity
+        );
 
         const newTrack: InternalTrack = {
           id: newId,
@@ -285,12 +368,19 @@ export class TomatoTracker {
           class: pred.class,
           ripeness: predRipeness,
           confidence: pred.confidence,
+          blightType: pathology.type,
+          severity: pathology.severity,
+          sortingAction,
+          qualityGrade,
+          postHarvest,
           firstSeen: now,
           lastSeen: now,
           framesVisible: 1,
           lostFrames: 0,
           counted: false,
           diameterMm,
+          weightGrams,
+          weightOz,
           trajectory: [{ x: predCentroid.x, y: predCentroid.y, time: now }],
         };
 

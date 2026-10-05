@@ -17,6 +17,11 @@ import {
   SlidersHorizontal,
   RotateCcw,
   Sparkles,
+  ExternalLink,
+  Play,
+  Tv,
+  Settings,
+  ChevronDown,
 } from 'lucide-react';
 import type {
   CameraStatus,
@@ -71,10 +76,34 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
   const nextFrameTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trackerRef = useRef<TomatoTracker>(new TomatoTracker({ useCountingLine: false }));
 
+  const [feedSource, setFeedSource] = useState<'camera' | 'simulation'>('camera');
+  const feedSourceRef = useRef<'camera' | 'simulation'>('camera');
+  feedSourceRef.current = feedSource;
+
+  const simCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const simAnimIdRef = useRef<number | null>(null);
+  const simOffsetRef = useRef<number>(0);
+  const simTomatoesRef = useRef<
+    Array<{
+      id: number;
+      x: number;
+      y: number;
+      radius: number;
+      speed: number;
+      type: 'ripe' | 'unripe' | 'early_blight' | 'late_blight';
+    }>
+  >([
+    { id: 1, x: 120, y: 240, radius: 48, speed: 2.2, type: 'ripe' },
+    { id: 2, x: 320, y: 232, radius: 45, speed: 2.2, type: 'early_blight' },
+    { id: 3, x: 510, y: 246, radius: 44, speed: 2.2, type: 'unripe' },
+    { id: 4, x: -80, y: 236, radius: 47, speed: 2.2, type: 'late_blight' },
+    { id: 5, x: -280, y: 240, radius: 46, speed: 2.2, type: 'ripe' },
+  ]);
+
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
-  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.45); // 45% default for robust real-time detection
-  const confidenceThresholdRef = useRef<number>(0.45);
+  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.95); // Strictly fixed at 95% for defense panel automated sorting
+  const confidenceThresholdRef = useRef<number>(0.95);
   confidenceThresholdRef.current = confidenceThreshold;
 
   const [stats, setStats] = useState<DetectionStats>({
@@ -117,6 +146,104 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
       }
     });
   }, []);
+
+  // YOLOv11 Model Architecture Backend State (Cloud vs Local Edge Pipeline)
+  const [modelBackend, setModelBackend] = useState<'yolov11_roboflow' | 'local_yolov11_onnx'>('yolov11_roboflow');
+  const [edgeStatus, setEdgeStatus] = useState<{
+    online: boolean;
+    localEngineReachable: boolean;
+    lastHeartbeat: number;
+    probeLatencyMs: number;
+    bufferedCount: number;
+  }>({
+    online: false,
+    localEngineReachable: false,
+    lastHeartbeat: 0,
+    probeLatencyMs: -1,
+    bufferedCount: 0,
+  });
+  const seenEdgeTracksRef = useRef<Set<number>>(new Set());
+
+  // Check initial backend configuration
+  useEffect(() => {
+    fetch('/api/model/config')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.activeBackend && (data.activeBackend === 'yolov11_roboflow' || data.activeBackend === 'local_yolov11_onnx')) {
+          setModelBackend(data.activeBackend);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const switchModelBackend = async (backend: 'yolov11_roboflow' | 'local_yolov11_onnx') => {
+    setModelBackend(backend);
+    try {
+      await fetch('/api/model/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend }),
+      });
+    } catch (e) {
+      console.warn('Could not switch model backend:', e);
+    }
+  };
+
+  // Poll edge status & ingest real-time edge telemetry streamed from blightdetect_yolo11.py
+  useEffect(() => {
+    const pollEdgeStatus = async () => {
+      try {
+        const res = await fetch('/api/edge/status');
+        if (res.ok) {
+          const data = await res.json();
+          setEdgeStatus({
+            online: Boolean(data.edgeScriptRunning),
+            localEngineReachable: Boolean(data.localEngineReachable),
+            lastHeartbeat: data.lastHeartbeat || 0,
+            probeLatencyMs: data.probeLatencyMs || -1,
+            bufferedCount: data.bufferedCount || 0,
+          });
+        }
+
+        // When in local edge mode, sync latest incoming detection records from the edge python script
+        if (modelBackend === 'local_yolov11_onnx') {
+          const latestRes = await fetch('/api/edge/latest');
+          if (latestRes.ok) {
+            const latestData = await latestRes.json();
+            const items = latestData.detections || [];
+            for (const item of items) {
+              if (!seenEdgeTracksRef.current.has(item.track_id)) {
+                seenEdgeTracksRef.current.add(item.track_id);
+                onTomatoCounted({
+                  id: `edge-${item.timestamp}-${item.track_id}`,
+                  sessionId,
+                  timestamp: item.timestamp,
+                  createdAt: item.created_at,
+                  class: item.raw_class,
+                  ripeness: item.ripeness,
+                  confidence: item.confidence_percentage,
+                  size: (item.size_category || 'medium') as any,
+                  diameterMm: item.diameter_mm,
+                  bbox: item.bbox || { x: 320, y: 240, width: 140, height: 140 },
+                  trackId: item.track_id,
+                  blightType: item.blight_type as any,
+                  severity: item.severity as any,
+                  sortingAction: item.sorting_action as any,
+                  qualityGrade: item.quality_grade as any,
+                });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Silent error in background polling
+      }
+    };
+
+    pollEdgeStatus();
+    const interval = setInterval(pollEdgeStatus, 2500);
+    return () => clearInterval(interval);
+  }, [sessionId, onTomatoCounted, modelBackend]);
 
   // Low-Light Filter state management
   const [internalLowLightConfig, setInternalLowLightConfig] = useState<LowLightFilterConfig>({
@@ -188,10 +315,208 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
   const onFpsUpdateRef = useRef(onFpsUpdate);
   onFpsUpdateRef.current = onFpsUpdate;
 
+  // Draw realistic animated conveyor belt with moving tomatoes for simulation mode
+  const drawSimulationFrame = useCallback(() => {
+    const canvas = simCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = canvas.width || 640;
+    const h = canvas.height || 480;
+
+    // 1. Clear background
+    ctx.fillStyle = '#1c1917';
+    ctx.fillRect(0, 0, w, h);
+
+    // 2. Conveyor Belt
+    const beltTop = 130;
+    const beltBottom = 350;
+    const beltHeight = beltBottom - beltTop;
+
+    ctx.fillStyle = '#292524';
+    ctx.fillRect(0, beltTop, w, beltHeight);
+
+    // Guide rails
+    ctx.fillStyle = '#44403c';
+    ctx.fillRect(0, beltTop - 12, w, 12);
+    ctx.fillRect(0, beltBottom, w, 12);
+
+    // Moving hazard stripes on top rail
+    const stripeW = 20;
+    simOffsetRef.current = (simOffsetRef.current + 2.2) % (stripeW * 2);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, beltTop - 12, w, 12);
+    ctx.clip();
+    for (let x = -stripeW * 2 + (simOffsetRef.current % (stripeW * 2)); x < w + stripeW * 2; x += stripeW * 2) {
+      ctx.fillStyle = '#eab308';
+      ctx.beginPath();
+      ctx.moveTo(x, beltTop);
+      ctx.lineTo(x + stripeW, beltTop - 12);
+      ctx.lineTo(x + stripeW * 1.5, beltTop - 12);
+      ctx.lineTo(x + stripeW * 0.5, beltTop);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Moving belt slats
+    ctx.strokeStyle = '#383431';
+    ctx.lineWidth = 2;
+    const slatSpacing = 40;
+    const slatOffset = simOffsetRef.current % slatSpacing;
+    for (let sx = -slatSpacing + slatOffset; sx < w + slatSpacing; sx += slatSpacing) {
+      ctx.beginPath();
+      ctx.moveTo(sx, beltTop);
+      ctx.lineTo(sx, beltBottom);
+      ctx.stroke();
+    }
+
+    // Overhead light cone
+    const lightGrad = ctx.createRadialGradient(w / 2, (beltTop + beltBottom) / 2, 40, w / 2, (beltTop + beltBottom) / 2, 280);
+    lightGrad.addColorStop(0, 'rgba(255, 255, 255, 0.08)');
+    lightGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = lightGrad;
+    ctx.fillRect(0, beltTop, w, beltHeight);
+
+    // 3. Render and update each tomato
+    simTomatoesRef.current.forEach((t) => {
+      t.x += t.speed;
+      if (t.x > w + t.radius + 40) {
+        const minX = Math.min(...simTomatoesRef.current.map((o) => o.x));
+        t.x = Math.min(-60, minX - 160);
+        t.y = 230 + (Math.random() * 20 - 10);
+        const types: Array<'ripe' | 'unripe' | 'early_blight' | 'late_blight'> = [
+          'ripe',
+          'early_blight',
+          'ripe',
+          'late_blight',
+          'unripe',
+        ];
+        t.type = types[Math.floor(Math.random() * types.length)];
+      }
+
+      ctx.save();
+      // Drop shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.beginPath();
+      ctx.ellipse(t.x, t.y + t.radius * 0.75, t.radius * 0.85, t.radius * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Tomato body
+      const tomatoGrad = ctx.createRadialGradient(
+        t.x - t.radius * 0.3,
+        t.y - t.radius * 0.3,
+        t.radius * 0.1,
+        t.x,
+        t.y,
+        t.radius
+      );
+
+      if (t.type === 'unripe') {
+        tomatoGrad.addColorStop(0, '#a3e635');
+        tomatoGrad.addColorStop(0.6, '#65a30d');
+        tomatoGrad.addColorStop(1, '#3f6212');
+      } else {
+        tomatoGrad.addColorStop(0, '#f87171');
+        tomatoGrad.addColorStop(0.55, '#dc2626');
+        tomatoGrad.addColorStop(1, '#991b1b');
+      }
+
+      ctx.fillStyle = tomatoGrad;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Specific lesions
+      if (t.type === 'early_blight') {
+        const lesionX = t.x + t.radius * 0.2;
+        const lesionY = t.y - t.radius * 0.1;
+        const lesionR = t.radius * 0.38;
+
+        ctx.fillStyle = '#451a03';
+        ctx.beginPath();
+        ctx.arc(lesionX, lesionY, lesionR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#1c1917';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(lesionX, lesionY, lesionR * 0.65, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = '#0c0a09';
+        ctx.beginPath();
+        ctx.arc(lesionX, lesionY, lesionR * 0.32, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (t.type === 'late_blight') {
+        const rotX = t.x - t.radius * 0.15;
+        const rotY = t.y + t.radius * 0.1;
+        ctx.fillStyle = '#1c1917';
+        ctx.beginPath();
+        ctx.ellipse(rotX, rotY, t.radius * 0.45, t.radius * 0.35, Math.PI / 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#292524';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+
+      // Specular reflection
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.beginPath();
+      ctx.ellipse(t.x - t.radius * 0.32, t.y - t.radius * 0.35, t.radius * 0.22, t.radius * 0.12, -Math.PI / 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Calyx stem
+      ctx.fillStyle = '#15803d';
+      ctx.beginPath();
+      const calyxX = t.x;
+      const calyxY = t.y - t.radius * 0.85;
+      const starR = t.radius * 0.28;
+      for (let i = 0; i < 5; i++) {
+        const angle = (i * Math.PI * 2) / 5 - Math.PI / 2;
+        const outerX = calyxX + Math.cos(angle) * starR;
+        const outerY = calyxY + Math.sin(angle) * starR;
+        if (i === 0) ctx.moveTo(outerX, outerY);
+        else ctx.lineTo(outerX, outerY);
+        const innerAngle = angle + Math.PI / 5;
+        const innerX = calyxX + Math.cos(innerAngle) * (starR * 0.4);
+        const innerY = calyxY + Math.sin(innerAngle) * (starR * 0.4);
+        ctx.lineTo(innerX, innerY);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+    });
+  }, []);
+
+  const startSimulationCanvasAnimation = useCallback(() => {
+    if (simAnimIdRef.current) {
+      cancelAnimationFrame(simAnimIdRef.current);
+      simAnimIdRef.current = null;
+    }
+    const loop = () => {
+      drawSimulationFrame();
+      simAnimIdRef.current = requestAnimationFrame(loop);
+    };
+    simAnimIdRef.current = requestAnimationFrame(loop);
+  }, [drawSimulationFrame]);
+
+  const stopSimulationStream = useCallback(() => {
+    if (simAnimIdRef.current) {
+      cancelAnimationFrame(simAnimIdRef.current);
+      simAnimIdRef.current = null;
+    }
+  }, []);
+
   // Stop camera stream and cleanup
   const stopCameraStream = useCallback(() => {
     isLoopRunningRef.current = false;
     isStartedRef.current = false;
+
+    stopSimulationStream();
 
     if (nextFrameTimeoutRef.current) {
       clearTimeout(nextFrameTimeoutRef.current);
@@ -244,23 +569,44 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
     onFpsUpdateRef.current?.(0);
     setActiveTracksState([]);
     trackerRef.current.reset();
-  }, [setCameraStatus]);
+  }, [setCameraStatus, stopSimulationStream]);
 
   // Main continuous inference loop
   const runInferenceLoop = useCallback(async () => {
-    if (!isLoopRunningRef.current || !videoRef.current) return;
+    if (!isLoopRunningRef.current) return;
 
+    const isSim = feedSourceRef.current === 'simulation';
     const video = videoRef.current;
-    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
-      // Wait for video frame to be ready
-      animFrameIdRef.current = requestAnimationFrame(() => {
-        runInferenceLoop();
-      });
-      return;
-    }
+    const simCanvas = simCanvasRef.current;
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+    let sourceEl: CanvasImageSource | null = null;
+    let vw = 640;
+    let vh = 480;
+
+    if (isSim) {
+      if (!simCanvas) {
+        if (isLoopRunningRef.current) {
+          animFrameIdRef.current = requestAnimationFrame(runInferenceLoop);
+        }
+        return;
+      }
+      sourceEl = simCanvas;
+      vw = simCanvas.width || 640;
+      vh = simCanvas.height || 480;
+    } else {
+      if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+        // Wait for video frame to be ready
+        if (isLoopRunningRef.current) {
+          animFrameIdRef.current = requestAnimationFrame(() => {
+            runInferenceLoop();
+          });
+        }
+        return;
+      }
+      sourceEl = video;
+      vw = video.videoWidth;
+      vh = video.videoHeight;
+    }
 
     // Initialize offscreen capture canvas
     if (!offscreenCanvasRef.current) {
@@ -294,8 +640,8 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
       offCtx.filter = 'none';
     }
 
-    // Draw current camera frame to capture buffer with programmatic enhancement
-    offCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
+    // Draw current camera or simulation frame to capture buffer with programmatic enhancement
+    offCtx.drawImage(sourceEl, 0, 0, targetWidth, targetHeight);
 
     // Extract uncompressed frame ImageData for high-accuracy pixel vision analysis
     const frameImageData = offCtx.getImageData(0, 0, targetWidth, targetHeight);
@@ -424,8 +770,9 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
           ...evt,
           inferenceLatencyMs: inferenceDuration,
         });
-        // Auto-dispatch hardware actuator signal via Web Serial API
-        arduinoSerial.handleDetectionEvent(evt.ripeness, evt.confidence);
+
+        // Automatically dispatch size sorting signal to physical Arduino actuator
+        arduinoSerial.handleDetectionEvent(evt.size, evt.ripeness, evt.confidence);
       });
 
       // 4. Update UI telemetry & calculate real-time inference FPS
@@ -587,6 +934,45 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
       ctx.fillStyle = '#ffffff';
       ctx.fillText(tagText, x + 8, tagY + 15);
 
+      // Secondary HUD Badge: Calibrated Commercial Slicing Sizing (60-75mm / 110-170g)
+      const sizeMm = track.diameterMm || Math.round(((w + h) / 2) * 0.35);
+      const sizeCat = sizeMm < 60 ? 'Small' : sizeMm <= 75 ? 'Medium' : 'Large';
+      const weightG =
+        track.weightGrams ||
+        (sizeCat === 'Small'
+          ? Math.round(40 + Math.max(0, (sizeMm - 25) / 34) * 69)
+          : sizeCat === 'Medium'
+          ? Math.round(110 + ((sizeMm - 60) / 15) * 60)
+          : Math.round(171 + Math.min(1, (sizeMm - 75) / 45) * 109));
+      const action = track.sortingAction || (confidence < 0.95 ? 'MANUAL_REVIEW' : ripeness === 'blight' ? 'REJECT_QUARANTINE' : 'ACCEPT');
+      const grade = track.qualityGrade || (ripeness === 'blight' ? 'Grade C' : confidence >= 0.95 ? 'Grade A' : 'Grade B');
+
+      const subTagText = `${sizeMm}mm (${sizeCat} • ${weightG}g) • ${grade} • ${action}`;
+      ctx.font = 'bold 10px monospace';
+      const subMetrics = ctx.measureText(subTagText);
+      const subWidth = subMetrics.width + 12;
+      const subHeight = 18;
+      const subY = Math.min(vh - 22, y + h + 4);
+
+      let subBadgeColor = 'rgba(5, 150, 105, 0.92)'; // Emerald for ACCEPT
+      if (action === 'REJECT_QUARANTINE') {
+        subBadgeColor = 'rgba(220, 38, 38, 0.92)'; // Red for REJECT
+      } else if (action === 'MANUAL_REVIEW') {
+        subBadgeColor = 'rgba(217, 119, 6, 0.92)'; // Amber for REVIEW (<95% conf)
+      }
+
+      ctx.fillStyle = subBadgeColor;
+      ctx.beginPath();
+      ctx.roundRect(x, subY, subWidth, subHeight, 4);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(subTagText, x + 6, subY + 13);
+
       // Draw Centroid dot & trajectory
       ctx.fillStyle = strokeColor;
       ctx.beginPath();
@@ -610,10 +996,60 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
     });
   };
 
+  // Start Simulation Feed with animated conveyor belt & tomatoes
+  const startSimulationStream = useCallback(() => {
+    // Stop camera stream tracks if active
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn('Track stop error:', e);
+        }
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setFeedSource('simulation');
+    feedSourceRef.current = 'simulation';
+    setCameraStatus('live');
+    setErrorMessage(null);
+    setErrorDetails(null);
+    isStartedRef.current = true;
+    isLoopRunningRef.current = true;
+
+    // Start drawing moving tomatoes onto simCanvas
+    startSimulationCanvasAnimation();
+
+    // Start vision inference loop on canvas frames
+    animFrameIdRef.current = requestAnimationFrame(() => {
+      runInferenceLoop();
+    });
+  }, [runInferenceLoop, setCameraStatus, startSimulationCanvasAnimation]);
+
   // Start Camera & Permission Flow
   const startCameraAndInference = useCallback(async () => {
-    if (isStartedRef.current) return;
+    if (isStartedRef.current && feedSourceRef.current === 'camera') return;
 
+    // Stop simulation if running
+    stopSimulationStream();
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn('Track stop error:', e);
+        }
+      });
+      streamRef.current = null;
+    }
+
+    setFeedSource('camera');
+    feedSourceRef.current = 'camera';
     setErrorMessage(null);
     setErrorDetails(null);
     setCameraStatus('requesting');
@@ -625,14 +1061,24 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'environment', // Prefer back camera on mobile
-        },
-        audio: false,
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'environment', // Prefer back camera on mobile
+          },
+          audio: false,
+        });
+      } catch (highResErr) {
+        const highResError = highResErr as { name?: string };
+        if (highResError.name === 'OverconstrainedError' || highResError.name === 'TypeError') {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        } else {
+          throw highResErr;
+        }
+      }
 
       streamRef.current = stream;
       isStartedRef.current = true;
@@ -640,42 +1086,53 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().then(() => {
-            setCameraStatus('live');
-            isLoopRunningRef.current = true;
-            runInferenceLoop();
-          }).catch((playErr) => {
-            console.error('Video play error:', playErr);
-          });
+          videoRef.current
+            ?.play()
+            .then(() => {
+              setCameraStatus('live');
+              isLoopRunningRef.current = true;
+              runInferenceLoop();
+            })
+            .catch((playErr) => {
+              console.warn('Video play warning:', playErr);
+            });
         };
       }
     } catch (err: unknown) {
       isStartedRef.current = false;
       const error = err as { name?: string; message?: string };
-      console.error('Camera access error:', error);
+      console.warn('Camera access request status:', error?.name || error?.message || error);
 
-      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+      if (
+        error.name === 'NotAllowedError' ||
+        error.name === 'PermissionDeniedError' ||
+        (error.message && error.message.includes('Permission denied'))
+      ) {
         setCameraStatus('blocked');
-        setErrorMessage('Camera access is blocked.');
+        setErrorMessage('Camera access was denied or is restricted in this browser frame.');
         setErrorDetails(
-          'Please allow camera permission from your browser address bar (lock/camera icon) and refresh or click "Start Camera".'
+          'Webcam access requires browser permission. You can enable camera permission in your address bar, open the app in a new tab, or switch immediately to the interactive Conveyor Simulation feed.'
         );
       } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
         setCameraStatus('no_device');
-        setErrorMessage('No camera device was found. Connect a webcam and reload.');
+        setErrorMessage('No physical camera device was detected on this system.');
+        setErrorDetails('Connect a webcam and click Retry, or launch the Conveyor Simulation feed.');
       } else if (error.name === 'SecurityError') {
         setCameraStatus('error');
-        setErrorMessage('Camera access was blocked due to browser security restrictions.');
+        setErrorMessage('Camera access was blocked due to iframe security policy.');
+        setErrorDetails('Open this app in a standalone tab or launch the Conveyor Simulation feed.');
       } else {
         setCameraStatus('error');
-        setErrorMessage(`Camera initialization error: ${error.message || 'Unknown error'}`);
+        setErrorMessage(`Camera initialization notice: ${error.message || 'Unavailable'}`);
       }
     }
-  }, [setCameraStatus, runInferenceLoop]);
+  }, [setCameraStatus, runInferenceLoop, stopSimulationStream]);
 
-  // Auto-start camera when mounted in Live Stream
+  // Auto-start camera when mounted in Live Stream; if restricted, it gracefully falls back to prompt
   useEffect(() => {
-    startCameraAndInference();
+    startCameraAndInference().catch((err) => {
+      console.warn('Camera initial check:', err);
+    });
 
     return () => {
       stopCameraStream();
@@ -684,6 +1141,12 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
   // Capture current frame for Roboflow testing & diagnostics
   const getCurrentFrameBase64 = useCallback((): string | null => {
+    if (feedSourceRef.current === 'simulation') {
+      const canvas = simCanvasRef.current;
+      if (!canvas) return null;
+      return canvas.toDataURL('image/jpeg', 0.85);
+    }
+
     const video = videoRef.current;
     if (!video || video.readyState < 2) return null;
     const canvas = document.createElement('canvas');
@@ -774,136 +1237,62 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
       {/* Main Video Viewport Card */}
       <div className="relative overflow-hidden rounded-3xl border border-stone-800 bg-stone-950 shadow-2xl">
-        {/* Stream Top Header Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-800 bg-stone-900/80 px-4 py-2.5 sm:px-6">
+        {/* Stream Top Header Bar - Clean and Uncluttered */}
+        <div className="flex items-center justify-between gap-3 border-b border-stone-800 bg-stone-900/90 px-4 py-2.5 sm:px-6">
           <div className="flex items-center space-x-3">
             {cameraStatus === 'live' ? (
-              <div className="flex items-center space-x-2 sm:space-x-3">
+              <div className="flex items-center space-x-2.5">
                 {/* LIVE Badge */}
-                <span className="flex items-center space-x-1.5 rounded-full bg-red-950/90 px-2.5 py-1 text-xs font-bold uppercase tracking-wider text-red-400 border border-red-800/80 shadow-xs">
+                <span className="flex items-center space-x-1.5 rounded-full bg-red-950/80 px-2.5 py-0.5 text-xs font-semibold text-red-400 border border-red-800/60">
                   <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
                   <span>LIVE</span>
                 </span>
 
-                {/* CONVEYOR COUNTING ACTIVE Status Indicator */}
-                <div
-                  id="conveyor-counting-active-pill"
-                  className="flex items-center space-x-1.5 rounded-full bg-emerald-950/90 px-3 py-1 text-xs font-bold uppercase tracking-wider text-emerald-300 border border-emerald-700/80 shadow-xs"
+                {/* Feed Source Mode Indicator */}
+                <span
+                  id="header-feed-source-badge"
+                  className="inline-flex items-center space-x-1 text-xs text-stone-400"
                 >
-                  <span className="relative flex h-2 w-2">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-                  </span>
-                  <span>CONVEYOR COUNTING ACTIVE</span>
-                </div>
-
-                {/* Real-time Inference FPS Badge directly next to LIVE indicator */}
-                <div
-                  id="header-live-inference-fps"
-                  className="hidden md:flex items-center space-x-1.5 rounded-full bg-stone-800/90 px-2.5 py-1 text-xs font-mono font-bold text-stone-200 border border-stone-700/80 shadow-xs"
-                  title="Real-time YOLO inference frames per second"
-                >
-                  <Activity className="h-3.5 w-3.5 text-emerald-400 animate-pulse" />
-                  <span className="font-extrabold text-white text-xs">
-                    {stats.fps > 0
-                      ? stats.fps
-                      : stats.inferenceTimeMs > 0
-                      ? Math.round(1000 / (stats.inferenceTimeMs + 25))
-                      : '--'}
-                  </span>
-                  <span className="text-[10px] text-emerald-400 font-semibold">FPS</span>
-                </div>
+                  {feedSource === 'simulation' ? (
+                    <>
+                      <Tv className="h-3.5 w-3.5 text-amber-400" />
+                      <span>Conveyor Simulation</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="h-3.5 w-3.5 text-stone-400" />
+                      <span>Webcam Feed</span>
+                    </>
+                  )}
+                </span>
               </div>
             ) : (
               <span className="flex items-center space-x-2 text-xs font-medium text-stone-400">
-                <CameraOff className="h-4 w-4 text-stone-500" />
-                <span>STANDBY</span>
+                <CameraOff className="h-3.5 w-3.5 text-stone-500" />
+                <span>Standby</span>
               </span>
             )}
-
-            {/* Currently in frame indicator */}
-            <div className="hidden sm:flex items-center space-x-1.5 rounded-md bg-stone-800 px-2.5 py-1 text-xs text-stone-300">
-              <Eye className="h-3.5 w-3.5 text-blue-400" />
-              <span>Visible in View:</span>
-              <span className="font-bold text-white">{stats.currentVisibleCount}</span>
-            </div>
           </div>
 
-          {/* Telemetry info & Controls */}
-          <div className="flex items-center space-x-2 sm:space-x-3 text-xs text-stone-400">
-            {/* Roboflow Status & Resend / Inspector Badge Button */}
+          {/* Right Toolbar Controls: Clean and Unified */}
+          <div className="flex items-center space-x-2 text-xs">
+            {/* Low-Light Toggle */}
             <button
-              id="btn-roboflow-diagnostics"
-              onClick={() => setIsDiagnosticModalOpen(true)}
-              className="flex items-center space-x-1.5 rounded-lg bg-stone-800/90 hover:bg-stone-750 px-2.5 py-1 text-xs text-stone-200 border border-stone-700/60 transition-colors cursor-pointer"
-              title="Inspect Roboflow YOLO connection, resend current frame, or adjust sensitivity"
+              id="btn-toggle-low-light"
+              onClick={() => updateLowLightConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
+              className={`flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                activeLowLightConfig.enabled
+                  ? 'bg-amber-950/80 text-amber-300 border border-amber-700/80'
+                  : 'bg-stone-800/80 text-stone-400 hover:text-stone-200 border border-stone-700/60'
+              }`}
+              title="Toggle Low-Light enhancement filter"
             >
-              <Zap className="h-3.5 w-3.5 text-red-400" />
-              <span className="font-semibold text-[11px] text-stone-300">Roboflow:</span>
-              <span className="flex items-center space-x-1">
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    roboflowApiStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                  }`}
-                />
-                <span className="font-mono text-emerald-400 font-bold text-[11px]">
-                  {roboflowApiStatus === 'connected' ? 'Online' : 'Checking'}
-                </span>
+              <Moon className={`h-3.5 w-3.5 ${activeLowLightConfig.enabled ? 'text-amber-400 fill-amber-400/30' : 'text-stone-400'}`} />
+              <span className="hidden sm:inline">Low-Light</span>
+              <span className="text-[10px] font-bold">
+                {activeLowLightConfig.enabled ? 'ON' : 'OFF'}
               </span>
-              <RefreshCw className="h-3 w-3 text-stone-400 hover:text-stone-200 ml-0.5" />
             </button>
-
-            {/* Confidence Threshold Badge / Quick Selector */}
-            <div
-              className="flex items-center space-x-1.5 rounded-lg bg-stone-800/90 px-2.5 py-1 text-xs text-stone-200 border border-stone-700/60"
-              title="Detection Confidence Threshold"
-            >
-              <span className="text-stone-400 text-[11px]">Conf:</span>
-              <span className="font-bold font-mono text-emerald-400">
-                {(confidenceThreshold * 100).toFixed(0)}%
-              </span>
-            </div>
-
-            {cameraStatus === 'live' && (
-              <span className="hidden lg:inline text-stone-400 font-mono text-xs">
-                Latency: <strong className="text-stone-200">{stats.inferenceTimeMs}ms</strong>
-              </span>
-            )}
-
-            {/* Low-Light Filter Quick Toggle & Drawer Button */}
-            <div className="flex items-center space-x-1">
-              <button
-                id="btn-toggle-low-light"
-                onClick={() => updateLowLightConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
-                className={`flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-bold transition-all ${
-                  activeLowLightConfig.enabled
-                    ? 'bg-amber-950/90 text-amber-300 border border-amber-600/80 shadow-xs shadow-amber-900/30'
-                    : 'bg-stone-800 text-stone-400 hover:text-stone-200 hover:bg-stone-750 border border-stone-700/60'
-                }`}
-                title="Toggle Low-Light stream filter for dark/shadowed packhouses"
-              >
-                <Moon className={`h-3.5 w-3.5 ${activeLowLightConfig.enabled ? 'text-amber-400 fill-amber-400/30 animate-pulse' : 'text-stone-400'}`} />
-                <span className="font-semibold">Low-Light</span>
-                <span className={`text-[10px] font-extrabold px-1.5 py-0.2 rounded ${
-                  activeLowLightConfig.enabled ? 'bg-amber-500/20 text-amber-300' : 'bg-stone-900 text-stone-500'
-                }`}>
-                  {activeLowLightConfig.enabled ? 'ON' : 'OFF'}
-                </span>
-              </button>
-
-              <button
-                id="btn-low-light-settings"
-                onClick={() => setShowLowLightDrawer(!showLowLightDrawer)}
-                className={`p-1 rounded-lg border transition-colors ${
-                  showLowLightDrawer
-                    ? 'bg-amber-900/60 text-amber-200 border-amber-700'
-                    : 'bg-stone-800 text-stone-400 hover:text-stone-200 border-stone-700/60'
-                }`}
-                title="Configure Low-Light Brightness & Contrast Tuning"
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-              </button>
-            </div>
           </div>
         </div>
 
@@ -932,43 +1321,10 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
                 <span className="text-stone-600">|</span>
                 <span className="text-stone-300 font-mono text-[11px]">{stats.inferenceTimeMs}ms</span>
               </div>
-
-              {/* Low-Light Active HUD Pill */}
-              {activeLowLightConfig.enabled && (
-                <div
-                  id="hud-low-light-badge"
-                  className="flex items-center space-x-1.5 rounded-xl bg-amber-950/90 backdrop-blur-md px-3 py-1.5 text-xs font-bold border border-amber-600/80 text-amber-300 shadow-xl"
-                >
-                  <Moon className="h-3.5 w-3.5 text-amber-400 fill-amber-400/40 animate-pulse" />
-                  <span>Low-Light Boost</span>
-                  <span className="text-amber-500/80 font-mono">|</span>
-                  <span className="font-mono text-amber-200">
-                    +{activeLowLightConfig.brightness - 100}% B / +{activeLowLightConfig.contrast - 100}% C
-                  </span>
-                </div>
-              )}
             </div>
           )}
 
-          {/* CRITICAL: PROMINENT "NO TOMATO DETECTED" DISPLAY WHEN DETECTION AREA IS CLEAR */}
-          {cameraStatus === 'live' && stats.currentVisibleCount === 0 && (
-            <div
-              id="no-tomato-detected-overlay"
-              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none select-none flex flex-col items-center justify-center text-center px-4"
-            >
-              <div className="flex items-center space-x-3 rounded-2xl bg-black/85 backdrop-blur-md px-6 py-3.5 border border-stone-700/90 shadow-2xl">
-                <span className="h-3 w-3 rounded-full bg-stone-500 animate-ping"></span>
-                <span className="text-sm sm:text-base font-black uppercase tracking-widest text-stone-100">
-                  NO TOMATO DETECTED
-                </span>
-              </div>
-              <p className="mt-2.5 text-[11px] font-medium text-stone-400 bg-black/60 px-3.5 py-1 rounded-full backdrop-blur-sm border border-stone-800 max-w-xs">
-                Detection area clear • Conveyor sensor active (&ge;{(confidenceThreshold * 100).toFixed(0)}% conf)
-              </p>
-            </div>
-          )}
-
-          {/* Native HTML5 Video with programmatic CSS Brightness/Contrast Filter */}
+          {/* Native HTML5 Video for Webcam Stream */}
           <video
             ref={videoRef}
             playsInline
@@ -988,10 +1344,18 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
                 : 'none',
               transition: 'filter 0.25s ease-out',
             }}
-            className={`h-full w-full object-contain ${cameraStatus === 'live' ? 'block' : 'hidden'}`}
+            className={`h-full w-full object-contain ${cameraStatus === 'live' && feedSource === 'camera' ? 'block' : 'hidden'}`}
           />
 
-          {/* Real-time Bounding Box Canvas Overlay */}
+          {/* Realistic Conveyor Simulation Canvas */}
+          <canvas
+            ref={simCanvasRef}
+            width={640}
+            height={480}
+            className={`h-full w-full object-contain ${cameraStatus === 'live' && feedSource === 'simulation' ? 'block' : 'hidden'}`}
+          />
+
+          {/* Real-time Bounding Box & HUD Canvas Overlay */}
           <canvas
             ref={canvasRef}
             className="absolute inset-0 h-full w-full object-contain pointer-events-none z-10"
@@ -1026,7 +1390,7 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
                   </div>
                   <div>
                     <div className="text-xs font-bold">Stream Preprocessing Filter</div>
-                    <div className="text-[10px] text-stone-400">Boosts brightness & contrast for YOLOv8</div>
+                    <div className="text-[10px] text-stone-400">Boosts brightness & contrast for YOLOv11</div>
                   </div>
                 </div>
                 <button
@@ -1229,27 +1593,72 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
           {/* STATE: Blocked Permission */}
           {cameraStatus === 'blocked' && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-stone-950/95 z-20">
-              <div className="h-14 w-14 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center mb-4">
-                <AlertTriangle className="h-7 w-7 text-red-500" />
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-stone-950/95 z-20 overflow-y-auto">
+              <div className="h-14 w-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mb-3">
+                <ShieldAlert className="h-7 w-7 text-amber-400" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2">Camera Access is Blocked</h3>
-              <p className="text-sm text-stone-300 max-w-md mb-3 leading-relaxed">
-                {errorMessage || 'Camera access is blocked.'}
+              <h3 className="text-lg font-bold text-white mb-1.5">Camera Access Restricted</h3>
+              <p className="text-sm text-stone-300 max-w-lg mb-4 leading-relaxed">
+                Browser privacy restrictions or iframe sandboxing prevented access to the local webcam device.
               </p>
-              <p className="text-xs text-stone-400 max-w-lg mb-6 leading-relaxed bg-stone-900 p-3 rounded-xl border border-stone-800">
-                {errorDetails ||
-                  'To continue, click the lock or camera icon in your browser address bar, set Camera to "Allow", and click Start Camera below or reload.'}
-              </p>
-              <div className="flex items-center space-x-3">
+
+              {/* Primary Action Callouts */}
+              <div className="flex flex-col sm:flex-row items-center gap-3 mb-5 w-full max-w-md justify-center">
+                {/* 1. Launch conveyor simulation */}
+                <button
+                  id="btn-launch-conveyor-sim"
+                  onClick={startSimulationStream}
+                  className="w-full sm:w-auto flex items-center justify-center space-x-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition-all active:scale-95"
+                >
+                  <Play className="h-4 w-4 fill-white" />
+                  <span>Run Conveyor Simulation</span>
+                </button>
+
+                {/* 2. Retry permission */}
                 <button
                   id="btn-retry-camera-permission"
                   onClick={startCameraAndInference}
-                  className="flex items-center space-x-2 rounded-xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:bg-red-500 transition-colors"
+                  className="w-full sm:w-auto flex items-center justify-center space-x-2 rounded-xl bg-stone-800 hover:bg-stone-700 px-4 py-2.5 text-sm font-semibold text-stone-200 border border-stone-700 transition-colors"
                 >
-                  <RefreshCw className="h-4 w-4" />
-                  <span>Retry Permission</span>
+                  <RefreshCw className="h-4 w-4 text-stone-400" />
+                  <span>Retry Camera</span>
                 </button>
+
+                {/* 3. Open in new window if in iframe */}
+                <button
+                  id="btn-open-standalone-tab"
+                  onClick={() => {
+                    try {
+                      window.open(window.location.href, '_blank');
+                    } catch (e) {
+                      console.warn('Could not open new window:', e);
+                    }
+                  }}
+                  className="w-full sm:w-auto flex items-center justify-center space-x-1.5 rounded-xl bg-stone-800/60 hover:bg-stone-800 px-3.5 py-2.5 text-xs font-semibold text-stone-300 border border-stone-750 transition-colors"
+                  title="Open application in a direct standalone window to request native browser camera permissions"
+                >
+                  <ExternalLink className="h-3.5 w-3.5 text-stone-400" />
+                  <span>Standalone Tab</span>
+                </button>
+              </div>
+
+              {/* Step by step browser permissions helper */}
+              <div className="text-left text-xs text-stone-400 max-w-lg bg-stone-900/90 p-3.5 rounded-xl border border-stone-800 space-y-1.5">
+                <div className="font-bold text-stone-300 flex items-center space-x-1.5 mb-1">
+                  <span>How to enable your webcam:</span>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <span className="font-mono text-amber-400 font-bold">1.</span>
+                  <span>Click the tune / lock or camera icon in your browser address bar.</span>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <span className="font-mono text-amber-400 font-bold">2.</span>
+                  <span>Set <strong>Camera</strong> to <strong>Allow</strong>.</span>
+                </div>
+                <div className="flex items-start space-x-2">
+                  <span className="font-mono text-amber-400 font-bold">3.</span>
+                  <span>Click <strong>Retry Camera</strong> above, or click <strong>Run Conveyor Simulation</strong> to test sorting immediately without camera hardware.</span>
+                </div>
               </div>
             </div>
           )}
@@ -1262,16 +1671,26 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
               </div>
               <h3 className="text-lg font-bold text-white mb-2">No Camera Found</h3>
               <p className="text-sm text-stone-400 max-w-md mb-6 leading-relaxed">
-                No camera device was detected. Connect a webcam and click Retry to start the live detection stream.
+                No camera device was detected on your device. Connect a webcam or test with our animated conveyor simulation.
               </p>
-              <button
-                id="btn-retry-camera-device"
-                onClick={startCameraAndInference}
-                className="flex items-center space-x-2 rounded-xl bg-red-600 hover:bg-red-500 px-5 py-2.5 text-sm font-semibold text-white transition-colors"
-              >
-                <RefreshCw className="h-4 w-4" />
-                <span>Retry Connection</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  id="btn-no-device-sim"
+                  onClick={startSimulationStream}
+                  className="flex items-center space-x-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 text-sm font-bold text-white transition-colors"
+                >
+                  <Play className="h-4 w-4 fill-white" />
+                  <span>Run Conveyor Simulation</span>
+                </button>
+                <button
+                  id="btn-retry-camera-device"
+                  onClick={startCameraAndInference}
+                  className="flex items-center space-x-2 rounded-xl bg-stone-800 hover:bg-stone-700 px-4 py-2.5 text-sm font-semibold text-stone-200 border border-stone-700 transition-colors"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Retry Connection</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -1281,29 +1700,39 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
               <div className="h-16 w-16 rounded-3xl bg-stone-900 border border-stone-800 flex items-center justify-center mb-4">
                 <CameraOff className="h-8 w-8 text-stone-500" />
               </div>
-              <h3 className="text-lg font-bold text-white mb-2">Camera Stopped</h3>
+              <h3 className="text-lg font-bold text-white mb-2">Vision Feed Standby</h3>
               <p className="text-sm text-stone-400 max-w-sm mb-6">
-                Session was saved to permanent history. Click Start Camera to begin a new detection stream.
+                Choose a feed source to begin real-time sorting and tomato detection.
               </p>
-              <button
-                id="btn-start-camera-standby"
-                onClick={() => {
-                  onStartCamera();
-                  startCameraAndInference();
-                }}
-                className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 px-6 py-3 text-sm font-bold text-white shadow-lg hover:from-red-500 hover:to-rose-500 transition-all"
-              >
-                <Camera className="h-5 w-5" />
-                <span>Start Camera</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  id="btn-start-camera-standby"
+                  onClick={() => {
+                    onStartCamera();
+                    startCameraAndInference();
+                  }}
+                  className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg hover:from-red-500 hover:to-rose-500 transition-all"
+                >
+                  <Camera className="h-4 w-4" />
+                  <span>Start Webcam</span>
+                </button>
+                <button
+                  id="btn-start-sim-standby"
+                  onClick={startSimulationStream}
+                  className="flex items-center space-x-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg hover:bg-emerald-500 transition-all"
+                >
+                  <Play className="h-4 w-4 fill-white" />
+                  <span>Conveyor Simulation</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
 
         {/* Bottom Control Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-stone-800 bg-stone-900/90 px-4 py-3 sm:px-6">
-          {/* Main Camera Switch Action */}
-          <div className="flex items-center space-x-3">
+          {/* Stream Control Actions */}
+          <div className="flex flex-wrap items-center gap-2.5">
             {cameraStatus === 'live' ? (
               <button
                 id="btn-stop-camera"
@@ -1314,7 +1743,7 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
                 className="flex items-center space-x-2 rounded-xl bg-red-600 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg hover:bg-red-500 transition-all active:scale-95"
               >
                 <CameraOff className="h-4 w-4" />
-                <span>Stop Camera</span>
+                <span>Stop Stream</span>
               </button>
             ) : (
               <button
@@ -1326,9 +1755,35 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
                 className="flex items-center space-x-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg hover:bg-emerald-500 transition-all active:scale-95"
               >
                 <Camera className="h-4 w-4" />
-                <span>Start Camera</span>
+                <span>Start Webcam</span>
               </button>
             )}
+
+            {/* Quick Switch to Simulation / Webcam */}
+            <button
+              id="btn-toggle-feed-source"
+              onClick={() => {
+                if (feedSource === 'simulation') {
+                  startCameraAndInference();
+                } else {
+                  startSimulationStream();
+                }
+              }}
+              className="flex items-center space-x-1.5 rounded-xl bg-stone-800 hover:bg-stone-750 px-3.5 py-2 text-xs font-bold text-stone-200 border border-stone-700 transition-colors"
+              title="Toggle between physical webcam and simulated conveyor belt"
+            >
+              {feedSource === 'simulation' ? (
+                <>
+                  <Camera className="h-3.5 w-3.5 text-stone-300" />
+                  <span>Switch to Webcam</span>
+                </>
+              ) : (
+                <>
+                  <Tv className="h-3.5 w-3.5 text-amber-400" />
+                  <span>Switch to Conveyor Sim</span>
+                </>
+              )}
+            </button>
           </div>
 
           {/* Quick classification legend */}
@@ -1348,66 +1803,6 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Live Tracked Objects Feed */}
-      {activeTracksState.length > 0 && (
-        <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900/60 p-4 shadow-xs transition-colors">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2 text-xs font-bold uppercase tracking-wider text-stone-700 dark:text-stone-400">
-              <Eye className="h-4 w-4 text-blue-500 dark:text-blue-400" />
-              <span>Active Tracks In Frame ({activeTracksState.length})</span>
-            </div>
-            <span className="text-[11px] text-stone-400 dark:text-stone-500">Centroid & IoU duplicate filter active</span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5">
-            {activeTracksState.map((track) => (
-              <div
-                key={track.id}
-                className="flex items-center justify-between p-2.5 rounded-xl bg-stone-50 dark:bg-stone-950 border border-stone-200 dark:border-stone-800 text-xs transition-colors"
-              >
-                <div className="flex items-center space-x-2">
-                  <span
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      track.ripeness === 'ripe'
-                        ? 'bg-emerald-500'
-                        : track.ripeness === 'unripe'
-                        ? 'bg-lime-500'
-                        : 'bg-red-500'
-                    }`}
-                  ></span>
-                  <div>
-                    <div className="font-bold text-stone-900 dark:text-white">{track.class}</div>
-                    <div className="text-[10px] text-stone-500 dark:text-stone-400">
-                      ID #{track.id} • {(track.confidence * 100).toFixed(0)}% conf
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="inline-block rounded bg-stone-200 dark:bg-stone-800 px-2 py-0.5 text-[10px] font-semibold text-stone-700 dark:text-stone-300">
-                    ~{track.diameterMm || 65}mm
-                  </span>
-                  <div className="text-[9px] text-emerald-600 dark:text-emerald-400 font-semibold mt-0.5">
-                    {track.counted ? 'Counted ✓' : 'Tracking...'}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Roboflow Model Diagnostic & Frame Resend Modal */}
-      <RoboflowDiagnosticModal
-        isOpen={isDiagnosticModalOpen}
-        onClose={() => setIsDiagnosticModalOpen(false)}
-        confidenceThreshold={confidenceThreshold}
-        onConfidenceChange={(val) => setConfidenceThreshold(val)}
-        currentEndpoint={activeEndpoint}
-        onEndpointChange={(ep) => setActiveEndpoint(ep)}
-        opticalFallbackEnabled={opticalFallbackEnabled}
-        onOpticalFallbackToggle={(enabled) => setOpticalFallbackEnabled(enabled)}
-        getCurrentFrameBase64={getCurrentFrameBase64}
-      />
     </div>
   );
 };

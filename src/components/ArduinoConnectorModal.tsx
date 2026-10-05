@@ -1,29 +1,31 @@
 /**
- * Arduino & IoT Actuator Controller & Setup Guide Modal
+ * Arduino & IoT Tomato Size Sorter Actuator Controller Modal
+ * Supports Small, Medium, Large, and Reject bins via Web Serial API.
  */
 import React, { useState, useEffect } from 'react';
 import {
   Cpu,
-  Usb,
+  X,
+  Zap,
+  Play,
   CheckCircle2,
-  AlertTriangle,
+  AlertCircle,
+  Copy,
+  Terminal,
+  RefreshCw,
+  ExternalLink,
+  Layers,
+  Sparkles,
+  ShieldCheck,
+  Check,
+  HelpCircle,
   Radio,
   Sliders,
-  Copy,
-  Check,
-  RotateCw,
-  Terminal,
-  Zap,
-  Volume2,
-  X,
-  Layers,
-  ArrowRight,
-  Sparkles,
 } from 'lucide-react';
 import {
   arduinoSerial,
-  type SerialLogEntry,
-  type ActuatorCommand,
+  SerialLogEntry,
+  SortingMode,
 } from '../lib/arduino-serial.ts';
 
 interface ArduinoConnectorModalProps {
@@ -32,77 +34,197 @@ interface ArduinoConnectorModalProps {
 }
 
 const ARDUINO_SKETCH_CODE = `/*
- * Tomato Auto-Sorter - Arduino Actuator Controller
- * Listens for serial commands from Web Vision App:
- * 'R' = Ripe (Servo 45 deg)
- * 'U' = Unripe (Servo 135 deg)
- * 'B' = Blight / Defect (Reject Servo 0 deg + Buzzer)
- * 'C' = Center / Neutral (90 deg)
+ * =====================================================================
+ * Tomato Conveyor Size Sorter (Small / Medium / Large)
+ * Compatible with Arduino Uno, Nano, Mega, ESP32, etc.
+ * =====================================================================
+ * 
+ * Hardware Setup:
+ *   - Pin 9  : Sorter Servo Motor Signal (SG90 / MG996R)
+ *   - Pin 3  : Blue LED   -> Small Tomato (< 60mm / < 4 oz)
+ *   - Pin 4  : Green LED  -> Medium Slicing Tomato (60 - 75mm / 4 - 6 oz)
+ *   - Pin 5  : Yellow LED -> Large Tomato (> 75mm / > 6 oz)
+ *   - Pin 6  : Red LED    -> Defective / Cull (Optional)
+ *   - Pin 7  : Buzzer     -> Alert on cull / gate action
+ * 
+ * Sorter Gate Angles (3-Way / 4-Way Chute):
+ *   - 30°  : Chute 1 -> Small Bin
+ *   - 90°  : Center  -> Medium Bin (Straight-through conveyor)
+ *   - 150° : Chute 2 -> Large Bin
+ *   - 180° : Chute 3 -> Cull / Reject Bin
+ * 
+ * Serial Commands (9600 Baud):
+ *   'S' or '1' -> Route to SMALL Bin
+ *   'M' or '2' -> Route to MEDIUM Bin
+ *   'L' or '3' -> Route to LARGE Bin
+ *   'R' or '4' -> Route to REJECT / DEFECT Bin
+ *   'T'        -> Run diagnostic sweep of all 3 sizes
+ * =====================================================================
  */
 
 #include <Servo.h>
 
-Servo sorterServo;
-const int SERVO_PIN = 9;      // Servo PWM Signal Pin
-const int LED_RIPE = 5;       // Green LED
-const int LED_UNRIPE = 6;     // Yellow LED
-const int LED_BLIGHT = 7;     // Red LED
-const int BUZZER_PIN = 8;     // Piezo Buzzer
+// --- Pin Definitions ---
+const int SERVO_PIN   = 9;
+const int LED_SMALL   = 3;  // Blue
+const int LED_MEDIUM  = 4;  // Green
+const int LED_LARGE   = 5;  // Yellow
+const int LED_REJECT  = 6;  // Red
+const int BUZZER_PIN  = 7;
+
+// --- Chute Servo Angles ---
+const int ANGLE_NEUTRAL = 90;   // Neutral idle position (Center)
+const int ANGLE_SMALL   = 30;   // Divert left -> Small bin
+const int ANGLE_MEDIUM  = 90;   // Straight pass -> Medium bin
+const int ANGLE_LARGE   = 150;  // Divert right -> Large bin
+const int ANGLE_REJECT  = 180;  // Full divert -> Reject bin
+
+// --- Timing Configurations ---
+const unsigned long GATE_DWELL_MS = 750; // Milliseconds gate stays open
+
+Servo chuteServo;
+unsigned long resetTimestamp = 0;
+bool gateIsOpen = false;
 
 void setup() {
-  Serial.begin(9600); // 9600 Baud Rate
-  
-  sorterServo.attach(SERVO_PIN);
-  sorterServo.write(90); // Idle neutral position (Center)
+  Serial.begin(9600);
 
-  pinMode(LED_RIPE, OUTPUT);
-  pinMode(LED_UNRIPE, OUTPUT);
-  pinMode(LED_BLIGHT, OUTPUT);
+  // Initialize Servo
+  chuteServo.attach(SERVO_PIN);
+  chuteServo.write(ANGLE_NEUTRAL);
+
+  // Initialize LEDs & Buzzer
+  pinMode(LED_SMALL, OUTPUT);
+  pinMode(LED_MEDIUM, OUTPUT);
+  pinMode(LED_LARGE, OUTPUT);
+  pinMode(LED_REJECT, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // Initial power-on flash
-  digitalWrite(LED_RIPE, HIGH);
-  delay(150);
-  digitalWrite(LED_RIPE, LOW);
+  // Power-on Indicator Sequence
+  digitalWrite(LED_SMALL, HIGH);
+  delay(120);
+  digitalWrite(LED_SMALL, LOW);
+  digitalWrite(LED_MEDIUM, HIGH);
+  delay(120);
+  digitalWrite(LED_MEDIUM, LOW);
+  digitalWrite(LED_LARGE, HIGH);
+  delay(120);
+  digitalWrite(LED_LARGE, LOW);
+
+  Serial.println(F("{\\"ready\\":true,\\"system\\":\\"Tomato_Size_Sorter_v2\\",\\"modes\\":[\\"SMALL\\",\\"MEDIUM\\",\\"LARGE\\"]}"));
 }
 
 void loop() {
+  // Listen for commands from the Computer Vision / Live Camera app
   if (Serial.available() > 0) {
-    char cmd = Serial.read();
+    char input = Serial.read();
 
-    // Reset LED indicators
-    digitalWrite(LED_RIPE, LOW);
-    digitalWrite(LED_UNRIPE, LOW);
-    digitalWrite(LED_BLIGHT, LOW);
-
-    switch (cmd) {
-      case 'R': // RIPE -> Bin 1
-        digitalWrite(LED_RIPE, HIGH);
-        sorterServo.write(45);
-        delay(650);
-        sorterServo.write(90); // Return to neutral
-        break;
-
-      case 'U': // UNRIPE -> Bin 2
-        digitalWrite(LED_UNRIPE, HIGH);
-        sorterServo.write(135);
-        delay(650);
-        sorterServo.write(90); // Return to neutral
-        break;
-
-      case 'B': // BLIGHT / DEFECT -> Reject Chute + Alarm
-        digitalWrite(LED_BLIGHT, HIGH);
-        tone(BUZZER_PIN, 1200, 250); // 1200Hz alarm tone
-        sorterServo.write(0);        // Reject position
-        delay(850);
-        sorterServo.write(90);
-        break;
-
-      case 'C': // Center Neutral
-        sorterServo.write(90);
-        break;
+    if (input != '\\n' && input != '\\r') {
+      routeTomatoBySize(input);
     }
   }
+
+  // Non-blocking auto-reset back to neutral center after tomato has dropped into bin
+  if (gateIsOpen && millis() >= resetTimestamp) {
+    chuteServo.write(ANGLE_NEUTRAL);
+    clearAllLEDs();
+    gateIsOpen = false;
+  }
+}
+
+void routeTomatoBySize(char sizeCode) {
+  clearAllLEDs();
+
+  switch (sizeCode) {
+    // --- SMALL TOMATO ---
+    case 'S':
+    case 's':
+    case '1':
+      digitalWrite(LED_SMALL, HIGH);
+      chuteServo.write(ANGLE_SMALL);
+      gateIsOpen = true;
+      resetTimestamp = millis() + GATE_DWELL_MS;
+      Serial.println(F("{\\"size\\":\\"SMALL\\",\\"bin\\":1,\\"angle\\":30}"));
+      break;
+
+    // --- MEDIUM TOMATO ---
+    case 'M':
+    case 'm':
+    case '2':
+      digitalWrite(LED_MEDIUM, HIGH);
+      chuteServo.write(ANGLE_MEDIUM);
+      gateIsOpen = true;
+      resetTimestamp = millis() + GATE_DWELL_MS;
+      Serial.println(F("{\\"size\\":\\"MEDIUM\\",\\"bin\\":2,\\"angle\\":90}"));
+      break;
+
+    // --- LARGE TOMATO ---
+    case 'L':
+    case 'l':
+    case '3':
+      digitalWrite(LED_LARGE, HIGH);
+      chuteServo.write(ANGLE_LARGE);
+      gateIsOpen = true;
+      resetTimestamp = millis() + GATE_DWELL_MS;
+      Serial.println(F("{\\"size\\":\\"LARGE\\",\\"bin\\":3,\\"angle\\":150}"));
+      break;
+
+    // --- REJECT / DEFECTIVE ---
+    case 'R':
+    case 'r':
+    case '4':
+      digitalWrite(LED_REJECT, HIGH);
+      digitalWrite(BUZZER_PIN, HIGH);
+      chuteServo.write(ANGLE_REJECT);
+      gateIsOpen = true;
+      resetTimestamp = millis() + (GATE_DWELL_MS + 250);
+      Serial.println(F("{\\"size\\":\\"REJECT\\",\\"bin\\":4,\\"angle\\":180}"));
+      break;
+
+    // --- SELF-TEST CYCLE ---
+    case 'T':
+    case 't':
+      runSizeBenchmarkTest();
+      break;
+
+    default:
+      Serial.print(F("{\\"unknown_command\\":\\""));
+      Serial.print(sizeCode);
+      Serial.println(F("\\"}"));
+      break;
+  }
+}
+
+void clearAllLEDs() {
+  digitalWrite(LED_SMALL, LOW);
+  digitalWrite(LED_MEDIUM, LOW);
+  digitalWrite(LED_LARGE, LOW);
+  digitalWrite(LED_REJECT, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void runSizeBenchmarkTest() {
+  Serial.println(F("{\\"status\\":\\"TESTING_SMALL_BIN\\"}"));
+  digitalWrite(LED_SMALL, HIGH);
+  chuteServo.write(ANGLE_SMALL);
+  delay(600);
+  digitalWrite(LED_SMALL, LOW);
+
+  Serial.println(F("{\\"status\\":\\"TESTING_MEDIUM_BIN\\"}"));
+  digitalWrite(LED_MEDIUM, HIGH);
+  chuteServo.write(ANGLE_MEDIUM);
+  delay(600);
+  digitalWrite(LED_MEDIUM, LOW);
+
+  Serial.println(F("{\\"status\\":\\"TESTING_LARGE_BIN\\"}"));
+  digitalWrite(LED_LARGE, HIGH);
+  chuteServo.write(ANGLE_LARGE);
+  delay(600);
+  digitalWrite(LED_LARGE, LOW);
+
+  chuteServo.write(ANGLE_NEUTRAL);
+  clearAllLEDs();
+  Serial.println(F("{\\"status\\":\\"TEST_COMPLETED\\"}"));
 }
 `;
 
@@ -110,22 +232,29 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const [activeTab, setActiveTab] = useState<'control' | 'guide' | 'code'>('control');
   const [isConnected, setIsConnected] = useState<boolean>(arduinoSerial.getConnected());
   const [logs, setLogs] = useState<SerialLogEntry[]>(arduinoSerial.getLogs());
   const [autoTrigger, setAutoTrigger] = useState<boolean>(arduinoSerial.getAutoTrigger());
+  const [sortingMode, setSortingMode] = useState<SortingMode>(arduinoSerial.getSortingMode());
   const [baudRate, setBaudRate] = useState<number>(9600);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'control' | 'guide' | 'code'>('control');
-  const [copied, setCopied] = useState<boolean>(false);
-  const [simulatedAngle, setSimulatedAngle] = useState<number>(90);
-  const [activeAction, setActiveAction] = useState<string>('IDLE');
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
 
   const isWebSerialSupported = arduinoSerial.isSupported();
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   useEffect(() => {
     const unsubscribe = arduinoSerial.subscribe((newLogs, connected) => {
-      setLogs(newLogs);
+      setLogs([...newLogs]);
       setIsConnected(connected);
+      if (connected) {
+        setConnectError(null);
+      }
+      setAutoTrigger(arduinoSerial.getAutoTrigger());
+      setSortingMode(arduinoSerial.getSortingMode());
     });
     return () => unsubscribe();
   }, []);
@@ -134,10 +263,11 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
 
   const handleConnect = async () => {
     setIsConnecting(true);
-    try {
-      await arduinoSerial.connect(baudRate);
-    } finally {
-      setIsConnecting(false);
+    setConnectError(null);
+    const result = await arduinoSerial.connect(baudRate);
+    setIsConnecting(false);
+    if (!result.success) {
+      setConnectError(result.message);
     }
   };
 
@@ -145,59 +275,58 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
     await arduinoSerial.disconnect();
   };
 
-  const handleSendCommand = (cmd: ActuatorCommand, angle: number, actionName: string) => {
-    setSimulatedAngle(angle);
-    setActiveAction(actionName);
+  const handleSendTestCommand = (cmd: string, name: string) => {
+    setLastAction(name);
     arduinoSerial.sendCommand(cmd);
-
-    // Auto-return to 90 deg after 800ms
-    setTimeout(() => {
-      setSimulatedAngle(90);
-      setActiveAction('IDLE (90°)');
-    }, 800);
+    setTimeout(() => setLastAction(null), 1200);
   };
 
   const handleCopyCode = () => {
     navigator.clipboard.writeText(ARDUINO_SKETCH_CODE);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const toggleAutoTrigger = () => {
+  const handleToggleAutoTrigger = () => {
     const next = !autoTrigger;
     setAutoTrigger(next);
     arduinoSerial.setAutoTrigger(next);
   };
 
+  const handleChangeSortingMode = (mode: SortingMode) => {
+    setSortingMode(mode);
+    arduinoSerial.setSortingMode(mode);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in duration-150">
-      <div 
-        id="arduino-modal-container"
-        className="relative flex flex-col w-full max-w-4xl max-h-[90vh] bg-white dark:bg-stone-900 rounded-2xl shadow-2xl border border-stone-200 dark:border-stone-800 overflow-hidden text-stone-900 dark:text-stone-100"
-      >
-        {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-stone-200 dark:border-stone-800 px-6 py-4 bg-stone-50/70 dark:bg-stone-900/80">
+    <div
+      id="arduino-modal-container"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs animate-in fade-in duration-200"
+    >
+      <div className="relative w-full max-w-4xl max-h-[92vh] flex flex-col rounded-3xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 shadow-2xl overflow-hidden transition-all text-stone-900 dark:text-stone-100">
+        
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-900/60">
           <div className="flex items-center space-x-3">
-            <div className={`p-2.5 rounded-xl border ${
-              isConnected 
-                ? 'bg-emerald-100 text-emerald-700 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800' 
-                : 'bg-stone-100 text-stone-700 border-stone-300 dark:bg-stone-800 dark:text-stone-300 dark:border-stone-700'
-            }`}>
-              <Cpu className="h-5 w-5" />
+            <div className={`p-2.5 rounded-2xl ${isConnected ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400' : 'bg-stone-200 dark:bg-stone-800 text-stone-600 dark:text-stone-400'}`}>
+              <Cpu className="h-6 w-6" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h2 className="text-lg font-bold">Arduino / IoT Sorter Controller</h2>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                  isConnected 
-                    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800' 
-                    : 'bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-400'
-                }`}>
-                  {isConnected ? '● Connected via USB' : '○ Disconnected / Standby'}
+                <h2 className="text-lg font-bold">Arduino / IoT Tomato Size Sorter</h2>
+                <span
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                    isConnected
+                      ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700'
+                      : 'bg-stone-200 dark:bg-stone-800 text-stone-600 dark:text-stone-400'
+                  }`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full mr-1.5 ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
+                  {isConnected ? 'USB Connected' : 'Disconnected / Standby'}
                 </span>
               </div>
               <p className="text-xs text-stone-500 dark:text-stone-400">
-                Direct Web Serial interface to control physical servo sorting gates & reject actuators
+                Direct Web Serial interface to control physical servo sorting gates (Small, Medium, Large)
               </p>
             </div>
           </div>
@@ -205,47 +334,45 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
           <button
             id="btn-close-arduino-modal"
             onClick={onClose}
-            className="rounded-lg p-2 text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:hover:bg-stone-800 dark:hover:text-stone-200 transition-colors"
+            className="p-2 rounded-xl text-stone-400 hover:text-stone-600 hover:bg-stone-100 dark:hover:bg-stone-800 dark:hover:text-stone-200 transition-colors cursor-pointer"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex border-b border-stone-200 dark:border-stone-800 px-6 bg-white dark:bg-stone-900 gap-2 pt-2">
+        {/* Tab Navigation */}
+        <div className="flex border-b border-stone-200 dark:border-stone-800 px-6 bg-stone-100/50 dark:bg-stone-900/40 text-xs font-semibold">
           <button
             id="tab-arduino-control"
             onClick={() => setActiveTab('control')}
-            className={`flex items-center space-x-2 py-2.5 px-4 text-xs font-bold border-b-2 transition-all ${
+            className={`flex items-center space-x-2 py-3 px-4 border-b-2 transition-colors cursor-pointer ${
               activeTab === 'control'
-                ? 'border-red-600 text-red-600 dark:text-red-400'
-                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-300'
+                ? 'border-red-600 text-red-600 dark:border-red-500 dark:text-red-400'
+                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-200'
             }`}
           >
             <Zap className="h-4 w-4" />
             <span>Live Hardware Control</span>
           </button>
-
           <button
             id="tab-arduino-guide"
             onClick={() => setActiveTab('guide')}
-            className={`flex items-center space-x-2 py-2.5 px-4 text-xs font-bold border-b-2 transition-all ${
+            className={`flex items-center space-x-2 py-3 px-4 border-b-2 transition-colors cursor-pointer ${
               activeTab === 'guide'
-                ? 'border-red-600 text-red-600 dark:text-red-400'
-                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-300'
+                ? 'border-red-600 text-red-600 dark:border-red-500 dark:text-red-400'
+                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-200'
             }`}
           >
-            <Layers className="h-4 w-4" />
+            <HelpCircle className="h-4 w-4" />
             <span>3-Step Quick Guide</span>
           </button>
-
           <button
             id="tab-arduino-code"
             onClick={() => setActiveTab('code')}
-            className={`flex items-center space-x-2 py-2.5 px-4 text-xs font-bold border-b-2 transition-all ${
+            className={`flex items-center space-x-2 py-3 px-4 border-b-2 transition-colors cursor-pointer ${
               activeTab === 'code'
-                ? 'border-red-600 text-red-600 dark:text-red-400'
-                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-300'
+                ? 'border-red-600 text-red-600 dark:border-red-500 dark:text-red-400'
+                : 'border-transparent text-stone-500 hover:text-stone-800 dark:hover:text-stone-200'
             }`}
           >
             <Terminal className="h-4 w-4" />
@@ -255,323 +382,377 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* TAB 1: Hardware Control */}
+
+          {/* TAB 1: Live Hardware Control */}
           {activeTab === 'control' && (
             <div className="space-y-6">
-              {/* Connection Status & Action Bar */}
-              <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-900/50 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex items-center space-x-3">
-                  <div className="p-3 bg-white dark:bg-stone-800 rounded-lg shadow-xs border border-stone-200 dark:border-stone-700">
-                    <Usb className="h-6 w-6 text-stone-700 dark:text-stone-300" />
+              
+              {/* Web Serial Browser Notice */}
+              {!isWebSerialSupported && (
+                <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex items-start space-x-3 text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                  <div className="text-xs space-y-1">
+                    <p className="font-bold">Web Serial API not detected</p>
+                    <p>
+                      Your current browser does not support native direct USB serial connection. Please use{' '}
+                      <strong>Google Chrome, Microsoft Edge, or Opera</strong> on desktop. You can still test the commands below in simulation mode.
+                    </p>
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-stone-800 dark:text-stone-200">
-                      USB Serial Connection
-                    </div>
-                    <div className="text-xs text-stone-500 dark:text-stone-400">
-                      {!isWebSerialSupported ? (
-                        <span className="text-amber-600 dark:text-amber-400 font-semibold">
-                          Web Serial requires Chrome, Edge, or Opera desktop browser.
-                        </span>
-                      ) : isConnected ? (
-                        <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                          Active & Transmitting at {baudRate} Baud.
-                        </span>
-                      ) : (
-                        'Ready to connect to USB Arduino Uno/Nano/Mega/ESP32.'
-                      )}
-                    </div>
+                </div>
+              )}
+
+              {/* USB Connection Card */}
+              <div className="p-5 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700/60 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="text-xs font-bold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    Serial Connection
+                  </div>
+                  <div className="text-sm font-semibold">
+                    {isConnected ? (
+                      <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                        <CheckCircle2 className="h-4 w-4" /> Connected to USB Sorter Controller
+                      </span>
+                    ) : (
+                      'Ready to connect to USB Arduino Uno/Nano/Mega/ESP32.'
+                    )}
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <select
-                    id="select-baud-rate"
-                    value={baudRate}
-                    onChange={(e) => setBaudRate(Number(e.target.value))}
-                    disabled={isConnected}
-                    aria-label="Select Baud Rate"
-                    className="rounded-lg border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 px-3 py-2 text-xs font-semibold text-stone-700 dark:text-stone-200 focus:ring-2 focus:ring-red-500"
-                  >
-                    <option value={9600}>9600 Baud (Standard)</option>
-                    <option value={115200}>115200 Baud (High-Speed / ESP32)</option>
-                    <option value={57600}>57600 Baud</option>
-                  </select>
-
-                  {!isConnected ? (
-                    <button
-                      id="btn-connect-serial-port"
-                      onClick={handleConnect}
-                      disabled={isConnecting || !isWebSerialSupported}
-                      className="flex items-center space-x-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 text-xs font-bold shadow-xs transition-colors"
+                <div className="flex items-center space-x-3">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs text-stone-500">Baud:</span>
+                    <select
+                      value={baudRate}
+                      disabled={isConnected}
+                      onChange={(e) => setBaudRate(Number(e.target.value))}
+                      className="text-xs font-mono bg-white dark:bg-stone-900 border border-stone-300 dark:border-stone-700 rounded-xl px-2.5 py-1.5 focus:outline-none"
                     >
-                      <Zap className="h-4 w-4" />
-                      <span>{isConnecting ? 'Connecting...' : 'Connect USB Arduino'}</span>
+                      <option value={9600}>9600 (Standard)</option>
+                      <option value={115200}>115200 (High Speed)</option>
+                    </select>
+                  </div>
+
+                  {isConnected ? (
+                    <button
+                      onClick={handleDisconnect}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 border border-red-200 dark:border-red-900/60 transition-colors cursor-pointer"
+                    >
+                      Disconnect
                     </button>
                   ) : (
                     <button
-                      id="btn-disconnect-serial-port"
-                      onClick={handleDisconnect}
-                      className="flex items-center space-x-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 text-xs font-bold shadow-xs transition-colors"
+                      id="btn-connect-usb-arduino"
+                      onClick={handleConnect}
+                      disabled={isConnecting}
+                      className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 shadow-md transition-all flex items-center space-x-2 cursor-pointer disabled:opacity-50"
                     >
-                      <span>Disconnect</span>
+                      <Zap className="h-4 w-4" />
+                      <span>{isConnecting ? 'Connecting...' : 'Connect USB Arduino'}</span>
                     </button>
                   )}
                 </div>
               </div>
 
-              {/* Automatic Vision Trigger Switch */}
-              <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 p-4 flex items-center justify-between">
-                <div className="flex items-center space-x-3">
-                  <div className={`p-2 rounded-lg ${autoTrigger ? 'bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400' : 'bg-stone-100 text-stone-400 dark:bg-stone-800'}`}>
-                    <Radio className="h-5 w-5" />
+              {/* Error or Iframe Guidance Banner */}
+              {connectError && (
+                <div className="p-4 rounded-2xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-red-900 dark:text-red-200 text-xs space-y-2">
+                  <div className="flex items-start space-x-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
+                    <div>
+                      <span className="font-bold">Connection Note: </span>
+                      <span>{connectError}</span>
+                    </div>
                   </div>
-                  <div>
-                    <div className="text-sm font-bold">Auto-Trigger Sorter on Live Camera Detection</div>
+                  {isInIframe && (
+                    <div className="pt-2 flex items-center gap-2">
+                      <button
+                        onClick={() => window.open(window.location.href, '_blank')}
+                        className="px-3.5 py-1.5 rounded-xl font-bold bg-red-600 hover:bg-red-500 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        <span>Open in Dedicated Tab for Direct USB Access</span>
+                      </button>
+                      <span className="text-stone-500">
+                        Chrome requires top-level window access to select USB devices.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Automation & Sorting Mode Controls */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                {/* Auto-Dispatch Toggle */}
+                <div className="p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/40 border border-stone-200 dark:border-stone-700/60 flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-bold uppercase tracking-wider text-stone-700 dark:text-stone-300 flex items-center gap-1.5">
+                      <Radio className="h-3.5 w-3.5 text-red-500" />
+                      Automated Vision Trigger
+                    </div>
                     <div className="text-xs text-stone-500 dark:text-stone-400">
-                      Sends serial sorting bytes automatically whenever a unique tomato passes the gate line
+                      Dispatches servo commands when camera identifies tomatoes
                     </div>
                   </div>
-                </div>
-
-                <button
-                  id="toggle-auto-serial-trigger"
-                  onClick={toggleAutoTrigger}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
-                    autoTrigger ? 'bg-red-600' : 'bg-stone-300 dark:bg-stone-700'
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                      autoTrigger ? 'translate-x-5' : 'translate-x-0'
+                  <button
+                    onClick={handleToggleAutoTrigger}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                      autoTrigger ? 'bg-red-600' : 'bg-stone-300 dark:bg-stone-700'
                     }`}
-                  />
-                </button>
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                        autoTrigger ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* Sorting Mode Selector */}
+                <div className="p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/40 border border-stone-200 dark:border-stone-700/60 space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-stone-700 dark:text-stone-300 flex items-center gap-1.5">
+                    <Sliders className="h-3.5 w-3.5 text-blue-500" />
+                    Sorting Logic Rule
+                  </div>
+                  <div className="flex gap-2 text-xs">
+                    <button
+                      onClick={() => handleChangeSortingMode('size')}
+                      className={`flex-1 py-1.5 px-2 rounded-xl font-semibold border transition-all cursor-pointer ${
+                        sortingMode === 'size'
+                          ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                          : 'bg-white dark:bg-stone-900 text-stone-600 dark:text-stone-400 border-stone-200 dark:border-stone-700'
+                      }`}
+                    >
+                      Size Only (S / M / L)
+                    </button>
+                    <button
+                      onClick={() => handleChangeSortingMode('health_and_size')}
+                      className={`flex-1 py-1.5 px-2 rounded-xl font-semibold border transition-all cursor-pointer ${
+                        sortingMode === 'health_and_size'
+                          ? 'bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700'
+                          : 'bg-white dark:bg-stone-900 text-stone-600 dark:text-stone-400 border-stone-200 dark:border-stone-700'
+                      }`}
+                    >
+                      Blight Cull + Size
+                    </button>
+                  </div>
+                </div>
+
               </div>
 
-              {/* Visual Servo Arm Simulation & Manual Actuator Trigger Panel */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Visual Servo Gate Visualizer */}
-                <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/50 dark:bg-stone-900/50 p-4 flex flex-col items-center justify-center text-center">
-                  <div className="text-xs font-bold uppercase tracking-wider text-stone-500 mb-2">
-                    Actuator Gate Position
-                  </div>
-
-                  {/* SVG Servo Dial */}
-                  <div className="relative w-48 h-32 flex items-center justify-center">
-                    <svg viewBox="0 0 200 120" className="w-full h-full">
-                      {/* Arc Base */}
-                      <path
-                        d="M 20 100 A 80 80 0 0 1 180 100"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="10"
-                        className="text-stone-200 dark:text-stone-800"
-                      />
-                      {/* 0 deg (Reject / Blight) */}
-                      <circle cx="20" cy="100" r="5" className="fill-rose-500" />
-                      <text x="10" y="115" fontSize="10" className="fill-rose-500 font-bold">Reject (0°)</text>
-
-                      {/* 45 deg (Ripe) */}
-                      <circle cx="43" cy="43" r="5" className="fill-emerald-500" />
-                      <text x="30" y="30" fontSize="10" className="fill-emerald-600 font-bold">Ripe (45°)</text>
-
-                      {/* 90 deg (Idle Center) */}
-                      <circle cx="100" cy="20" r="5" className="fill-stone-400" />
-                      <text x="85" y="12" fontSize="10" className="fill-stone-500 font-bold">Idle (90°)</text>
-
-                      {/* 135 deg (Unripe) */}
-                      <circle cx="157" cy="43" r="5" className="fill-amber-500" />
-                      <text x="145" y="30" fontSize="10" className="fill-amber-600 font-bold">Unripe (135°)</text>
-
-                      {/* Servo Arm Needle */}
-                      <g transform={`rotate(${simulatedAngle - 90} 100 100)`} className="transition-transform duration-300 ease-out">
-                        <line
-                          x1="100"
-                          y1="100"
-                          x2="100"
-                          y2="28"
-                          stroke="#ef4444"
-                          strokeWidth="4"
-                          strokeLinecap="round"
-                        />
-                        <circle cx="100" cy="100" r="10" className="fill-stone-800 dark:fill-white" />
-                      </g>
-                    </svg>
-                  </div>
-
-                  <div className="mt-2 text-sm font-bold text-stone-900 dark:text-white">
-                    Current: <span className="text-red-600 dark:text-red-400 font-mono">{activeAction}</span>
-                  </div>
-                  <div className="text-[11px] text-stone-400">
-                    Physical Pin 9 PWM Sorter Gate
-                  </div>
+              {/* Direct Size Actuator Trigger Buttons */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-stone-600 dark:text-stone-400">
+                    Manual Size Gate Actuation
+                  </span>
+                  {lastAction && (
+                    <span className="text-xs font-mono font-bold text-red-600 dark:text-red-400 animate-pulse">
+                      Actuated: {lastAction}
+                    </span>
+                  )}
                 </div>
 
-                {/* Manual Actuator Trigger Buttons */}
-                <div className="flex flex-col justify-between space-y-3">
-                  <div className="text-xs font-bold uppercase tracking-wider text-stone-500">
-                    Manual Actuator Test Triggers
-                  </div>
-
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* SMALL */}
                   <button
-                    id="btn-test-serial-ripe"
-                    onClick={() => handleSendCommand('R', 45, 'RIPE (45° -> Bin 1)')}
-                    className="flex items-center justify-between p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors shadow-xs"
+                    onClick={() => handleSendTestCommand('S', 'Route SMALL (30°)')}
+                    className="p-4 rounded-2xl bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-800 text-blue-900 dark:text-blue-200 text-left transition-all hover:scale-[1.02] cursor-pointer"
                   >
-                    <div className="flex items-center space-x-3">
-                      <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
-                      <span className="font-bold text-xs">Test RIPE [ 'R' ]</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider bg-blue-200 dark:bg-blue-900 px-2 py-0.5 rounded-full text-blue-800 dark:text-blue-300">
+                        Bin 1
+                      </span>
+                      <span className="text-xs font-mono font-bold text-blue-600 dark:text-blue-400">30°</span>
                     </div>
-                    <span className="text-xs font-mono font-bold bg-emerald-200/80 dark:bg-emerald-800 px-2 py-0.5 rounded">
-                      Servo: 45°
-                    </span>
+                    <div className="font-bold text-sm">Route SMALL</div>
+                    <div className="text-[11px] text-blue-700 dark:text-blue-300">&lt; 60mm (&lt; 4 oz)</div>
                   </button>
 
+                  {/* MEDIUM */}
                   <button
-                    id="btn-test-serial-unripe"
-                    onClick={() => handleSendCommand('U', 135, 'UNRIPE (135° -> Bin 2)')}
-                    className="flex items-center justify-between p-3 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-colors shadow-xs"
+                    onClick={() => handleSendTestCommand('M', 'Route MEDIUM (90°)')}
+                    className="p-4 rounded-2xl bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-left transition-all hover:scale-[1.02] cursor-pointer"
                   >
-                    <div className="flex items-center space-x-3">
-                      <div className="w-3 h-3 rounded-full bg-amber-500"></div>
-                      <span className="font-bold text-xs">Test UNRIPE [ 'U' ]</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider bg-emerald-200 dark:bg-emerald-900 px-2 py-0.5 rounded-full text-emerald-800 dark:text-emerald-300">
+                        Bin 2
+                      </span>
+                      <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">90°</span>
                     </div>
-                    <span className="text-xs font-mono font-bold bg-amber-200/80 dark:bg-amber-800 px-2 py-0.5 rounded">
-                      Servo: 135°
-                    </span>
+                    <div className="font-bold text-sm">Route MEDIUM</div>
+                    <div className="text-[11px] text-emerald-700 dark:text-emerald-300">60 - 75mm (4 - 6 oz)</div>
                   </button>
 
+                  {/* LARGE */}
                   <button
-                    id="btn-test-serial-blight"
-                    onClick={() => handleSendCommand('B', 0, 'BLIGHT / DEFECT (0° + Buzzer)')}
-                    className="flex items-center justify-between p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors shadow-xs"
+                    onClick={() => handleSendTestCommand('L', 'Route LARGE (150°)')}
+                    className="p-4 rounded-2xl bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-left transition-all hover:scale-[1.02] cursor-pointer"
                   >
-                    <div className="flex items-center space-x-3">
-                      <Volume2 className="w-4 h-4 text-rose-600 dark:text-rose-400 animate-bounce" />
-                      <span className="font-bold text-xs">Test BLIGHT / REJECT [ 'B' ]</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider bg-amber-200 dark:bg-amber-900 px-2 py-0.5 rounded-full text-amber-800 dark:text-amber-300">
+                        Bin 3
+                      </span>
+                      <span className="text-xs font-mono font-bold text-amber-600 dark:text-amber-400">150°</span>
                     </div>
-                    <span className="text-xs font-mono font-bold bg-rose-200/80 dark:bg-rose-800 px-2 py-0.5 rounded">
-                      Reject: 0° + Tone
-                    </span>
+                    <div className="font-bold text-sm">Route LARGE</div>
+                    <div className="text-[11px] text-amber-700 dark:text-amber-300">&gt; 75mm (&gt; 6 oz)</div>
                   </button>
 
+                  {/* REJECT */}
                   <button
-                    id="btn-test-serial-center"
-                    onClick={() => handleSendCommand('C', 90, 'CENTER (90° Neutral)')}
-                    className="flex items-center justify-center p-2 rounded-xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-stone-700 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors text-xs font-semibold"
+                    onClick={() => handleSendTestCommand('R', 'Route REJECT (180°)')}
+                    className="p-4 rounded-2xl bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/50 border border-red-200 dark:border-red-800 text-red-900 dark:text-red-200 text-left transition-all hover:scale-[1.02] cursor-pointer"
                   >
-                    <RotateCw className="w-3.5 h-3.5 mr-1.5" />
-                    Reset to Center (90°)
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider bg-red-200 dark:bg-red-900 px-2 py-0.5 rounded-full text-red-800 dark:text-red-300">
+                        Bin 4
+                      </span>
+                      <span className="text-xs font-mono font-bold text-red-600 dark:text-red-400">180°</span>
+                    </div>
+                    <div className="font-bold text-sm">Route REJECT</div>
+                    <div className="text-[11px] text-red-700 dark:text-red-300">Defect / Blight Cull</div>
+                  </button>
+                </div>
+
+                <div className="pt-1 flex items-center justify-end">
+                  <button
+                    onClick={() => handleSendTestCommand('T', 'Self-Test Benchmark Sweep')}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>Run Sorter Self-Test Sweep ('T')</span>
                   </button>
                 </div>
               </div>
 
-              {/* Live Serial Command Output Stream */}
-              <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-900 text-stone-100 p-4 font-mono text-xs">
-                <div className="flex items-center justify-between mb-2 text-stone-400 border-b border-stone-800 pb-2">
-                  <div className="flex items-center space-x-2">
-                    <Terminal className="h-4 w-4 text-emerald-400" />
-                    <span className="font-bold text-white">Live Serial Telemetry</span>
-                  </div>
-                  <span className="text-[11px] text-stone-500">Latest 50 events</span>
+              {/* Live Serial Terminal Monitor */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-stone-500">
+                  <span className="flex items-center gap-1.5 font-bold uppercase tracking-wider">
+                    <Terminal className="h-3.5 w-3.5" />
+                    Live Serial Monitor Output
+                  </span>
+                  <span>{logs.length} entries</span>
                 </div>
 
-                <div className="h-32 overflow-y-auto space-y-1.5 pr-2">
+                <div className="h-40 overflow-y-auto font-mono text-[11px] p-3 rounded-2xl bg-stone-950 text-stone-300 border border-stone-800 space-y-1">
                   {logs.length === 0 ? (
-                    <div className="text-stone-500 italic py-2">No commands sent yet. Click a test button above.</div>
+                    <div className="text-stone-500 italic p-2">
+                      No serial communication logged yet. Press a button above or connect USB Arduino.
+                    </div>
                   ) : (
-                    logs.map((log, idx) => (
-                      <div key={idx} className="flex items-start space-x-2 text-[11px]">
-                        <span className="text-stone-500 shrink-0">[{log.timestamp}]</span>
-                        <span className={`font-bold px-1 rounded text-[10px] shrink-0 ${
-                          log.type === 'sent' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                          log.type === 'error' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
-                          'bg-stone-800 text-stone-300'
-                        }`}>
-                          {log.command}
+                    logs.map((log) => (
+                      <div key={log.id} className="flex items-start space-x-2">
+                        <span className="text-stone-600 shrink-0">[{log.timestamp}]</span>
+                        <span
+                          className={`font-semibold shrink-0 ${
+                            log.type === 'tx'
+                              ? 'text-cyan-400'
+                              : log.type === 'rx'
+                              ? 'text-emerald-400'
+                              : log.type === 'error'
+                              ? 'text-red-400'
+                              : 'text-stone-400'
+                          }`}
+                        >
+                          {log.message}
                         </span>
-                        <span className="text-stone-300">{log.label}</span>
                       </div>
                     ))
                   )}
                 </div>
               </div>
+
             </div>
           )}
 
-          {/* TAB 2: 3-Step Illustrated Guide */}
+          {/* TAB 2: Quick Wiring Guide */}
           {activeTab === 'guide' && (
             <div className="space-y-6">
-              <div className="text-center max-w-xl mx-auto">
-                <h3 className="text-lg font-bold">Connect Your Arduino in 3 Easy Steps</h3>
-                <p className="text-xs text-stone-500 mt-1">
-                  No complex setup required. The web app uses standard USB Serial to control your sorter.
+              <div>
+                <h3 className="text-base font-bold text-stone-900 dark:text-white">
+                  3-Step Sorter Hardware Setup
+                </h3>
+                <p className="text-xs text-stone-500 dark:text-stone-400">
+                  Wire your Arduino to the sorting conveyor with servo gate and LED indicators.
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Step 1 */}
-                <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-900/60 p-5 flex flex-col items-center text-center space-y-3">
-                  <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400 flex items-center justify-center font-bold text-base">
-                    1
-                  </div>
-                  <h4 className="font-bold text-sm">Plug in USB</h4>
-                  <p className="text-xs text-stone-500 dark:text-stone-400">
-                    Connect your Arduino Uno, Nano, or ESP32 to your computer with a standard USB cable.
-                  </p>
-                </div>
-
-                {/* Step 2 */}
-                <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-900/60 p-5 flex flex-col items-center text-center space-y-3">
-                  <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400 flex items-center justify-center font-bold text-base">
-                    2
-                  </div>
-                  <h4 className="font-bold text-sm">Upload Arduino Code</h4>
-                  <p className="text-xs text-stone-500 dark:text-stone-400">
-                    Copy the code from the <strong className="text-stone-800 dark:text-stone-200">Arduino Sketch</strong> tab and upload it using the free Arduino IDE.
-                  </p>
-                </div>
-
-                {/* Step 3 */}
-                <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-900/60 p-5 flex flex-col items-center text-center space-y-3">
-                  <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400 flex items-center justify-center font-bold text-base">
-                    3
-                  </div>
-                  <h4 className="font-bold text-sm">Click "Connect"</h4>
-                  <p className="text-xs text-stone-500 dark:text-stone-400">
-                    Click the green <strong className="text-emerald-600 dark:text-emerald-400">Connect USB Arduino</strong> button to start automated physical sorting!
-                  </p>
-                </div>
+              {/* Pinout Table */}
+              <div className="overflow-hidden rounded-2xl border border-stone-200 dark:border-stone-800">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-stone-100 dark:bg-stone-800/80 font-bold uppercase tracking-wider text-[10px] text-stone-600 dark:text-stone-400">
+                    <tr>
+                      <th className="p-3">Pin</th>
+                      <th className="p-3">Component</th>
+                      <th className="p-3">Sorting Purpose</th>
+                      <th className="p-3">Wiring Note</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-200 dark:divide-stone-800 font-mono">
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-red-600 dark:text-red-400">D9 (PWM)</td>
+                      <td className="p-3 font-sans font-semibold">Servo PWM Signal</td>
+                      <td className="p-3 font-sans">Multi-angle divert chute</td>
+                      <td className="p-3 font-sans text-stone-500">Orange/Yellow wire (SG90/MG996R)</td>
+                    </tr>
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-blue-600 dark:text-blue-400">D3</td>
+                      <td className="p-3 font-sans font-semibold">Blue LED</td>
+                      <td className="p-3 font-sans">Small Tomato (&lt; 60mm / &lt; 4 oz)</td>
+                      <td className="p-3 font-sans text-stone-500">Via 220Ω resistor to GND</td>
+                    </tr>
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-emerald-600 dark:text-emerald-400">D4</td>
+                      <td className="p-3 font-sans font-semibold">Green LED</td>
+                      <td className="p-3 font-sans">Medium Tomato (60-75mm / 4-6 oz)</td>
+                      <td className="p-3 font-sans text-stone-500">Via 220Ω resistor to GND</td>
+                    </tr>
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-amber-600 dark:text-amber-400">D5</td>
+                      <td className="p-3 font-sans font-semibold">Yellow LED</td>
+                      <td className="p-3 font-sans">Large Tomato (&gt; 75mm / &gt; 6 oz)</td>
+                      <td className="p-3 font-sans text-stone-500">Via 220Ω resistor to GND</td>
+                    </tr>
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-red-600 dark:text-red-400">D6</td>
+                      <td className="p-3 font-sans font-semibold">Red LED</td>
+                      <td className="p-3 font-sans">Defect / Cull Indicator</td>
+                      <td className="p-3 font-sans text-stone-500">Via 220Ω resistor to GND</td>
+                    </tr>
+                    <tr className="hover:bg-stone-50 dark:hover:bg-stone-800/30">
+                      <td className="p-3 font-bold text-purple-600 dark:text-purple-400">D7</td>
+                      <td className="p-3 font-sans font-semibold">Active Buzzer</td>
+                      <td className="p-3 font-sans">Audio Alarm on Reject</td>
+                      <td className="p-3 font-sans text-stone-500">Positive to D7, negative to GND</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
-              {/* Pin Wiring Table */}
-              <div className="rounded-xl border border-stone-200 dark:border-stone-800 overflow-hidden">
-                <div className="bg-stone-100 dark:bg-stone-800/80 px-4 py-2.5 font-bold text-xs flex items-center justify-between">
-                  <span>Hardware Pin Wiring Diagram</span>
-                  <span className="text-[11px] font-normal text-stone-500">Arduino Uno / Nano</span>
+              {/* 3 Step Instruction */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                <div className="p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700/60 space-y-2">
+                  <div className="h-6 w-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold">1</div>
+                  <div className="font-bold text-sm">Upload Arduino Code</div>
+                  <p className="text-stone-500 dark:text-stone-400">
+                    Switch to the <strong>Arduino Sketch</strong> tab, click Copy, and flash it to your board using the free Arduino IDE.
+                  </p>
                 </div>
-                <div className="divide-y divide-stone-200 dark:divide-stone-800 text-xs">
-                  <div className="p-3 grid grid-cols-3 gap-2">
-                    <span className="font-mono font-bold text-red-600">Pin 9 (PWM)</span>
-                    <span className="font-medium">Servo Signal (Orange wire)</span>
-                    <span className="text-stone-500">Diverts tomato to correct bin</span>
-                  </div>
-                  <div className="p-3 grid grid-cols-3 gap-2">
-                    <span className="font-mono font-bold text-emerald-600">Pin 5</span>
-                    <span className="font-medium">Green LED</span>
-                    <span className="text-stone-500">Lights on Ripe</span>
-                  </div>
-                  <div className="p-3 grid grid-cols-3 gap-2">
-                    <span className="font-mono font-bold text-amber-600">Pin 6</span>
-                    <span className="font-medium">Yellow LED</span>
-                    <span className="text-stone-500">Lights on Unripe</span>
-                  </div>
-                  <div className="p-3 grid grid-cols-3 gap-2">
-                    <span className="font-mono font-bold text-rose-600">Pin 7 & 8</span>
-                    <span className="font-medium">Red LED & Piezo Buzzer</span>
-                    <span className="text-stone-500">Alert on Blight Defect</span>
-                  </div>
+                <div className="p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700/60 space-y-2">
+                  <div className="h-6 w-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold">2</div>
+                  <div className="font-bold text-sm">Connect via USB</div>
+                  <p className="text-stone-500 dark:text-stone-400">
+                    Plug your Arduino into your PC. Click <strong>Connect USB Arduino</strong> on the Live Hardware Control tab.
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-stone-50 dark:bg-stone-800/50 border border-stone-200 dark:border-stone-700/60 space-y-2">
+                  <div className="h-6 w-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold">3</div>
+                  <div className="font-bold text-sm">Automatic Size Sorting</div>
+                  <p className="text-stone-500 dark:text-stone-400">
+                    Launch the <strong>Live Camera</strong>. Every detected tomato will automatically actuate the gate into the Small, Medium, or Large bin!
+                  </p>
                 </div>
               </div>
             </div>
@@ -582,40 +763,42 @@ export const ArduinoConnectorModal: React.FC<ArduinoConnectorModalProps> = ({
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold">Ready-to-Flash Arduino Sorter Sketch</h3>
-                  <p className="text-xs text-stone-500">Works with Arduino Uno, Nano, Mega, or ESP32.</p>
+                  <h3 className="text-sm font-bold">Ready-to-Flash Arduino Size Sorter Sketch</h3>
+                  <p className="text-xs text-stone-500">Supports Small (30°), Medium (90°), and Large (150°) sorting.</p>
                 </div>
-
                 <button
                   id="btn-copy-arduino-sketch"
                   onClick={handleCopyCode}
-                  className="flex items-center space-x-2 rounded-lg bg-red-600 hover:bg-red-700 text-white px-3.5 py-1.5 text-xs font-bold shadow-xs transition-colors"
+                  className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors shadow-xs cursor-pointer"
                 >
-                  {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  <span>{copied ? 'Copied to Clipboard!' : 'Copy Code (.ino)'}</span>
+                  {copiedCode ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  <span>{copiedCode ? 'Copied Code!' : 'Copy Code (.ino)'}</span>
                 </button>
               </div>
 
-              <div className="relative rounded-xl border border-stone-800 bg-stone-950 p-4 font-mono text-xs text-stone-200 overflow-x-auto max-h-96">
+              <div className="relative rounded-2xl bg-stone-950 p-4 border border-stone-800 font-mono text-xs text-stone-300 max-h-[50vh] overflow-y-auto">
                 <pre>{ARDUINO_SKETCH_CODE}</pre>
               </div>
             </div>
           )}
+
         </div>
 
-        {/* Modal Footer */}
-        <div className="border-t border-stone-200 dark:border-stone-800 px-6 py-3 bg-stone-50/70 dark:bg-stone-900/80 flex items-center justify-between">
-          <div className="text-xs text-stone-500">
-            Automated tomato gate dispatch • 9600 / 115200 Baud
+        {/* Footer */}
+        <div className="px-6 py-3.5 border-t border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-900/60 flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
+          <div className="flex items-center space-x-2">
+            <span>Size Basis: S (&lt;60mm / &lt;4oz) | M (60-75mm / 4-6oz / 110-170g) | L (&gt;75mm / &gt;6oz)</span>
+            <span>•</span>
+            <span>9600 Baud</span>
           </div>
-
           <button
             onClick={onClose}
-            className="rounded-lg bg-stone-200 dark:bg-stone-800 hover:bg-stone-300 dark:hover:bg-stone-700 text-stone-800 dark:text-stone-200 px-4 py-1.5 text-xs font-bold transition-colors"
+            className="px-4 py-1.5 rounded-xl font-semibold bg-stone-200 hover:bg-stone-300 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-800 dark:text-stone-200 transition-colors cursor-pointer"
           >
             Done
           </button>
         </div>
+
       </div>
     </div>
   );

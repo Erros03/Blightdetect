@@ -59,7 +59,7 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
                 BlightDetect<span className="text-red-500">+</span>
               </h1>
               <p className="text-sm text-stone-300 leading-relaxed">
-                Real-time tomato ripening classification, automated conveyor tracking, and early blight disease detection powered by continuous YOLO computer vision.
+                Real-time tomato ripening classification, automated conveyor tracking, and early blight disease detection powered by continuous YOLOv11 computer vision.
               </p>
             </div>
           </div>
@@ -240,7 +240,7 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
                       <th className="pb-2 font-semibold">Track ID</th>
                       <th className="pb-2 font-semibold">Class</th>
                       <th className="pb-2 font-semibold">Confidence</th>
-                      <th className="pb-2 font-semibold">Est. Size</th>
+                      <th className="pb-2 font-semibold">Est. Size & Weight</th>
                       <th className="pb-2 font-semibold">Action</th>
                     </tr>
                   </thead>
@@ -267,7 +267,27 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
                           </span>
                         </td>
                         <td className="py-2.5 font-semibold text-stone-800 dark:text-stone-200">{evt.confidence}%</td>
-                        <td className="py-2.5 text-stone-700 dark:text-stone-300 capitalize">{evt.size} (~{evt.diameterMm}mm)</td>
+                        <td className="py-2.5">
+                          <div className="flex items-center space-x-2">
+                            <span
+                              className={`inline-flex items-center px-2 py-0.5 rounded font-bold text-[11px] ${
+                                evt.size === 'small'
+                                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300'
+                                  : evt.size === 'large'
+                                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/80 dark:text-blue-300'
+                                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
+                              }`}
+                            >
+                              {evt.size === 'small' ? 'Small' : evt.size === 'large' ? 'Large' : 'Medium'}
+                            </span>
+                            <span className="text-[10px] text-stone-600 dark:text-stone-300 font-mono font-semibold">
+                              ~{evt.diameterMm}mm
+                            </span>
+                            <span className="text-[10px] text-stone-500 dark:text-stone-400 font-mono">
+                              • {evt.weightGrams ?? (evt.size === 'small' ? 85 : evt.size === 'large' ? 200 : 140)}g
+                            </span>
+                          </div>
+                        </td>
                         <td className="py-2.5">
                           {evt.ripeness === 'blight' ? (
                             <span className="text-red-600 dark:text-red-400 font-bold">Cull</span>
@@ -284,7 +304,7 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
           </div>
         </div>
 
-        {/* Right Col: Historical Sessions Snapshot & Fast Access */}
+        {/* Right Col: Historical Sessions */}
         <div className="space-y-6">
           <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900/90 p-5 shadow-xs transition-colors">
             <div className="flex items-center justify-between mb-4">
@@ -327,23 +347,6 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
                 ))}
               </div>
             )}
-          </div>
-
-          {/* Quick Guide Card */}
-          <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-900/60 p-4 text-xs text-stone-600 dark:text-stone-400 space-y-2">
-            <h4 className="font-bold text-stone-800 dark:text-stone-200 flex items-center space-x-1.5">
-              <Sparkles className="h-3.5 w-3.5 text-red-500 dark:text-red-400" />
-              <span>Conveyor Vision Workflow</span>
-            </h4>
-            <p className="leading-relaxed">
-              1. Camera continuously scans incoming tomatoes without manual clicks.
-            </p>
-            <p className="leading-relaxed">
-              2. Centroid tracking assigns unique IDs to prevent duplicate frame counts.
-            </p>
-            <p className="leading-relaxed">
-              3. Completed sessions persist permanently in detection_sessions.
-            </p>
           </div>
         </div>
       </div>
