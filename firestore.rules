@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidSession(data) {
+      return data.keys().hasAll(['id', 'date', 'startTime', 'createdAt', 'status', 'totalCount']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() <= 32 &&
+             data.startTime is string && data.startTime.size() <= 32 &&
+             data.createdAt is number &&
+             data.status is string && (data.status == 'active' || data.status == 'paused' || data.status == 'completed') &&
+             data.totalCount is number && data.totalCount >= 0;
+    }
+
+    function isValidDetection(data) {
+      return data.keys().hasAll(['id', 'sessionId', 'timestamp', 'class', 'ripeness', 'confidence', 'size', 'diameterMm']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.sessionId is string && data.sessionId.size() <= 128 &&
+             data.timestamp is number &&
+             data.class is string && data.class.size() <= 64 &&
+             data.ripeness is string && (data.ripeness == 'ripe' || data.ripeness == 'unripe' || data.ripeness == 'blight') &&
+             data.confidence is number && data.confidence >= 0 && data.confidence <= 100 &&
+             data.size is string && (data.size == 'small' || data.size == 'medium' || data.size == 'large') &&
+             data.diameterMm is number && data.diameterMm >= 0;
+    }
+
+    match /detection_sessions/{sessionId} {
+      allow get, list: if isValidId(sessionId);
+      allow create: if isValidId(sessionId) && isValidSession(incoming()) && incoming().id == sessionId;
+      allow update: if isValidId(sessionId) && isValidSession(incoming()) && incoming().id == existing().id;
+      allow delete: if isValidId(sessionId);
+    }
+
+    match /detections/{detectionId} {
+      allow get, list: if isValidId(detectionId);
+      allow create: if isValidId(detectionId) && isValidDetection(incoming()) && incoming().id == detectionId;
+      allow update: if isValidId(detectionId) && isValidDetection(incoming()) && incoming().id == existing().id;
+      allow delete: if isValidId(detectionId);
+    }
+  }
+}

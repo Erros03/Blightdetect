@@ -22,6 +22,7 @@ import {
   Tv,
   Settings,
   ChevronDown,
+  Power,
 } from 'lucide-react';
 import type {
   CameraStatus,
@@ -36,8 +37,8 @@ import type {
 import { detectTomatoesFn, checkRoboflowStatus } from '../lib/roboflow.functions.ts';
 import { TomatoTracker } from '../lib/tracker.ts';
 import { detectTomatoesFromImageData, validateTomatoBoundingBox } from '../lib/vision-detector.ts';
-import { arduinoSerial } from '../lib/arduino-serial.ts';
 import { RoboflowDiagnosticModal } from './RoboflowDiagnosticModal.tsx';
+import { handleYoloDetection, toggleConveyor, getIsConveyorRunning, subscribeSerial } from '../lib/arduino.ts';
 
 interface RoboflowDetectorProps {
   sessionId: string;
@@ -102,7 +103,7 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
-  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.95); // Strictly fixed at 95% for defense panel automated sorting
+  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.95); // Maintained strictly at 95% threshold for autonomous actuation
   const confidenceThresholdRef = useRef<number>(0.95);
   confidenceThresholdRef.current = confidenceThreshold;
 
@@ -117,9 +118,9 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
   const [activeTracksState, setActiveTracksState] = useState<TrackedTomato[]>([]);
 
-  // Roboflow YOLO configuration and diagnostics - default to Tomato Fruit Ripeness and Blight model
-  const [activeEndpoint, setActiveEndpoint] = useState<string>('tomato-fruit-ripeness-and-blight/1');
-  const activeEndpointRef = useRef<string>('tomato-fruit-ripeness-and-blight/1');
+  // Roboflow YOLO configuration and diagnostics - default to Version 2 model
+  const [activeEndpoint, setActiveEndpoint] = useState<string>('tomato-defect-and-unripe-detect-kdhgn/2');
+  const activeEndpointRef = useRef<string>('tomato-defect-and-unripe-detect-kdhgn/2');
   activeEndpointRef.current = activeEndpoint;
 
   const [opticalFallbackEnabled, setOpticalFallbackEnabled] = useState<boolean>(true);
@@ -257,6 +258,18 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
   const [showLowLightDrawer, setShowLowLightDrawer] = useState<boolean>(false);
   const [ambientLuminance, setAmbientLuminance] = useState<number>(55); // 0-100%
 
+  // Conveyor belt operational state (synchronized with Arduino relay)
+  const [conveyorRunning, setConveyorRunning] = useState<boolean>(getIsConveyorRunning());
+  const conveyorRunningRef = useRef<boolean>(getIsConveyorRunning());
+  conveyorRunningRef.current = conveyorRunning;
+
+  useEffect(() => {
+    return subscribeSerial((st) => {
+      setConveyorRunning(st.isConveyorRunning);
+      conveyorRunningRef.current = st.isConveyorRunning;
+    });
+  }, []);
+
   const activeLowLightConfig = controlledLowLightConfig ?? internalLowLightConfig;
   const lowLightConfigRef = useRef<LowLightFilterConfig>(activeLowLightConfig);
   lowLightConfigRef.current = activeLowLightConfig;
@@ -344,13 +357,16 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
     // Moving hazard stripes on top rail
     const stripeW = 20;
-    simOffsetRef.current = (simOffsetRef.current + 2.2) % (stripeW * 2);
+    const isBeltMoving = conveyorRunningRef.current;
+    if (isBeltMoving) {
+      simOffsetRef.current = (simOffsetRef.current + 2.2) % (stripeW * 2);
+    }
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, beltTop - 12, w, 12);
     ctx.clip();
     for (let x = -stripeW * 2 + (simOffsetRef.current % (stripeW * 2)); x < w + stripeW * 2; x += stripeW * 2) {
-      ctx.fillStyle = '#eab308';
+      ctx.fillStyle = isBeltMoving ? '#eab308' : '#78716c';
       ctx.beginPath();
       ctx.moveTo(x, beltTop);
       ctx.lineTo(x + stripeW, beltTop - 12);
@@ -361,7 +377,7 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
     ctx.restore();
 
     // Moving belt slats
-    ctx.strokeStyle = '#383431';
+    ctx.strokeStyle = isBeltMoving ? '#383431' : '#292524';
     ctx.lineWidth = 2;
     const slatSpacing = 40;
     const slatOffset = simOffsetRef.current % slatSpacing;
@@ -381,19 +397,21 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
     // 3. Render and update each tomato
     simTomatoesRef.current.forEach((t) => {
-      t.x += t.speed;
-      if (t.x > w + t.radius + 40) {
-        const minX = Math.min(...simTomatoesRef.current.map((o) => o.x));
-        t.x = Math.min(-60, minX - 160);
-        t.y = 230 + (Math.random() * 20 - 10);
-        const types: Array<'ripe' | 'unripe' | 'early_blight' | 'late_blight'> = [
-          'ripe',
-          'early_blight',
-          'ripe',
-          'late_blight',
-          'unripe',
-        ];
-        t.type = types[Math.floor(Math.random() * types.length)];
+      if (isBeltMoving) {
+        t.x += t.speed;
+        if (t.x > w + t.radius + 40) {
+          const minX = Math.min(...simTomatoesRef.current.map((o) => o.x));
+          t.x = Math.min(-60, minX - 160);
+          t.y = 230 + (Math.random() * 20 - 10);
+          const types: Array<'ripe' | 'unripe' | 'early_blight' | 'late_blight'> = [
+            'ripe',
+            'early_blight',
+            'ripe',
+            'late_blight',
+            'unripe',
+          ];
+          t.type = types[Math.floor(Math.random() * types.length)];
+        }
       }
 
       ctx.save();
@@ -490,6 +508,29 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
       ctx.restore();
     });
+
+    // 4. Paused Conveyor Overlay on Canvas
+    if (!isBeltMoving) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(0, beltTop, w, beltHeight);
+
+      // Warning border line
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(20, beltTop + 15, w - 40, beltHeight - 30);
+
+      ctx.fillStyle = '#fca5a5';
+      ctx.font = 'bold 15px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⏸ CONVEYOR BELT STOPPED (MOTOR OFF)', w / 2, (beltTop + beltBottom) / 2 - 8);
+
+      ctx.font = '11px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = '#fecaca';
+      ctx.fillText('Click [Conveyor: OFF] above to turn motor ON or send CONVEYOR_ON via serial', w / 2, (beltTop + beltBottom) / 2 + 16);
+      ctx.restore();
+    }
   }, []);
 
   const startSimulationCanvasAnimation = useCallback(() => {
@@ -742,17 +783,8 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
         }
       }
 
-      // SINGLE TOMATO DETECTION ONLY:
-      // Limit to exactly ONE detection per frame by selecting the single largest / most prominent tomato
-      if (rawPredictions.length > 1) {
-        rawPredictions.sort((a, b) => {
-          const areaA = a.width * a.height * (a.confidence || 1);
-          const areaB = b.width * b.height * (b.confidence || 1);
-          return areaB - areaA;
-        });
-        rawPredictions = [rawPredictions[0]];
-      }
-
+      // Multi-tomato simultaneous detection:
+      // Preserves all valid candidate tomatoes in frame for multi-object tracking and simultaneous display
       const inferenceDuration = Math.round(performance.now() - inferenceStart);
       consecutiveFailuresRef.current = 0;
 
@@ -771,8 +803,12 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
           inferenceLatencyMs: inferenceDuration,
         });
 
-        // Automatically dispatch size sorting signal to physical Arduino actuator
-        arduinoSerial.handleDetectionEvent(evt.size, evt.ripeness, evt.confidence);
+        // Trigger Arduino Serial command (BLIGHT, or RIPE/UNRIPE + delayed size)
+        handleYoloDetection({
+          disease: evt.ripeness === 'blight' ? 'blight' : undefined,
+          ripeness: evt.ripeness,
+          size: evt.size,
+        });
       });
 
       // 4. Update UI telemetry & calculate real-time inference FPS
@@ -937,17 +973,11 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
       // Secondary HUD Badge: Calibrated Commercial Slicing Sizing (60-75mm / 110-170g)
       const sizeMm = track.diameterMm || Math.round(((w + h) / 2) * 0.35);
       const sizeCat = sizeMm < 60 ? 'Small' : sizeMm <= 75 ? 'Medium' : 'Large';
-      const weightG =
-        track.weightGrams ||
-        (sizeCat === 'Small'
-          ? Math.round(40 + Math.max(0, (sizeMm - 25) / 34) * 69)
-          : sizeCat === 'Medium'
-          ? Math.round(110 + ((sizeMm - 60) / 15) * 60)
-          : Math.round(171 + Math.min(1, (sizeMm - 75) / 45) * 109));
       const action = track.sortingAction || (confidence < 0.95 ? 'MANUAL_REVIEW' : ripeness === 'blight' ? 'REJECT_QUARANTINE' : 'ACCEPT');
       const grade = track.qualityGrade || (ripeness === 'blight' ? 'Grade C' : confidence >= 0.95 ? 'Grade A' : 'Grade B');
 
-      const subTagText = `${sizeMm}mm (${sizeCat} • ${weightG}g) • ${grade} • ${action}`;
+      const sizeCm = (sizeMm / 10).toFixed(1);
+      const subTagText = `${sizeCm} cm (${sizeCat}) • ${grade} • ${action}`;
       ctx.font = 'bold 10px monospace';
       const subMetrics = ctx.measureText(subTagText);
       const subWidth = subMetrics.width + 12;
@@ -1276,6 +1306,35 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
 
           {/* Right Toolbar Controls: Clean and Unified */}
           <div className="flex items-center space-x-2 text-xs">
+            {/* Roboflow Model Settings Button */}
+            <button
+              onClick={() => setIsDiagnosticModalOpen(true)}
+              className="flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-medium bg-stone-800/80 text-stone-300 hover:text-white border border-stone-700/60 cursor-pointer transition-colors"
+              title="Click to view/change Roboflow model version or test predictions"
+            >
+              <Zap className="h-3.5 w-3.5 text-amber-400" />
+              <span className="hidden md:inline text-stone-400">Model:</span>
+              <span className="font-mono text-[11px] text-amber-300 max-w-[130px] truncate">{activeEndpoint}</span>
+            </button>
+
+            {/* Conveyor Belt Motor Toggle */}
+            <button
+              id="btn-toggle-conveyor-motor"
+              onClick={() => toggleConveyor()}
+              className={`flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all cursor-pointer ${
+                conveyorRunning
+                  ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/80 hover:bg-emerald-900/80'
+                  : 'bg-red-950/85 text-red-300 border border-red-700/80 hover:bg-red-900/80 animate-pulse'
+              }`}
+              title="Turn Conveyor Belt motor ON or OFF (Sends CONVEYOR_ON / CONVEYOR_OFF to Arduino)"
+            >
+              <Power className={`h-3.5 w-3.5 ${conveyorRunning ? 'text-emerald-400' : 'text-red-400'}`} />
+              <span className="hidden sm:inline">Conveyor:</span>
+              <span className={`font-bold ${conveyorRunning ? 'text-emerald-400' : 'text-red-400'}`}>
+                {conveyorRunning ? 'ON' : 'OFF'}
+              </span>
+            </button>
+
             {/* Low-Light Toggle */}
             <button
               id="btn-toggle-low-light"
@@ -1360,6 +1419,27 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
             ref={canvasRef}
             className="absolute inset-0 h-full w-full object-contain pointer-events-none z-10"
           />
+
+          {/* Live Detection Presence Status Pill */}
+          {cameraStatus === 'live' && activeTracksState.length === 0 && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none select-none">
+              <div className="flex items-center space-x-2 rounded-full bg-stone-950/85 backdrop-blur-md px-4 py-1.5 text-xs font-semibold text-stone-300 border border-stone-700/80 shadow-xl">
+                <span className="h-2 w-2 rounded-full bg-stone-500"></span>
+                <span>NO TOMATO DETECTED</span>
+              </div>
+            </div>
+          )}
+
+          {cameraStatus === 'live' && activeTracksState.length > 0 && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none select-none">
+              <div className="flex items-center space-x-2 rounded-full bg-emerald-950/90 backdrop-blur-md px-4 py-1.5 text-xs font-semibold text-emerald-300 border border-emerald-700/80 shadow-xl">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>
+                  {activeTracksState.length} {activeTracksState.length === 1 ? 'TOMATO' : 'TOMATOES'} DETECTED
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Low-Light Enhancement Settings Drawer / Popover */}
           {showLowLightDrawer && (
@@ -1803,6 +1883,22 @@ export const RoboflowDetector: React.FC<RoboflowDetectorProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Roboflow Model Inspector & Endpoint Config Modal */}
+      <RoboflowDiagnosticModal
+        isOpen={isDiagnosticModalOpen}
+        onClose={() => setIsDiagnosticModalOpen(false)}
+        currentEndpoint={activeEndpoint}
+        onEndpointChange={(newEp) => {
+          setActiveEndpoint(newEp);
+          activeEndpointRef.current = newEp;
+        }}
+        confidenceThreshold={confidenceThreshold}
+        onConfidenceChange={setConfidenceThreshold}
+        getCurrentFrameBase64={getCurrentFrameBase64}
+        opticalFallbackEnabled={opticalFallbackEnabled}
+        onOpticalFallbackToggle={setOpticalFallbackEnabled}
+      />
     </div>
   );
 };

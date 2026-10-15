@@ -483,10 +483,7 @@ export const HistoryRoute: React.FC = () => {
                             {e.size === 'small' ? 'Small' : e.size === 'large' ? 'Large' : 'Medium'}
                           </span>
                           <span className="text-[10px] text-stone-600 dark:text-stone-300 font-mono font-semibold ml-1">
-                            ~{e.diameterMm}mm
-                          </span>
-                          <span className="text-[10px] text-stone-500 dark:text-stone-400 font-mono ml-1">
-                            • {e.weightGrams ?? (e.size === 'small' ? 85 : e.size === 'large' ? 200 : 140)}g
+                            ~{((e.diameterMm || 65) / 10).toFixed(1)} cm
                           </span>
                         </td>
                       </tr>

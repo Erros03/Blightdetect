@@ -209,8 +209,8 @@ export function validateTomatoBoundingBox(
   const woodRatio = woodOrBackgroundPixels / totalSampled;
   const fruitRatio = tomatoFruitPixels / totalSampled;
 
-  // Reject if it overlaps significantly with skin or wood
-  if (skinRatio > 0.25) return false;
+  // Reject if it is predominantly skin (e.g. empty hand with no tomato)
+  if (skinRatio > 0.60 && fruitRatio < 0.12) return false;
   if (woodRatio > 0.50 && fruitRatio < 0.20) return false;
 
   // If labeled as Blight, MUST have confirmed tomato fruit surrounding the lesion
@@ -467,9 +467,6 @@ export function detectTomatoesFromImageData(
     const cx = Math.round(c.centerXSum / Math.max(1, c.pixelCount));
     const cy = Math.round(c.centerYSum / Math.max(1, c.pixelCount));
 
-    const avgConf = c.totalConf / Math.max(1, c.pixelCount);
-    if (avgConf < minConfidence) continue;
-
     // Classification: Ripe vs Unripe vs Blight
     let finalClass = 'Ripe Tomato';
     if (c.unripePixelCount > c.ripePixelCount) {
@@ -482,6 +479,8 @@ export function detectTomatoesFromImageData(
       finalClass = 'Blight / Diseased Tomato';
     }
 
+    const avgConf = c.totalConf / Math.max(1, c.pixelCount);
+
     // Calibrate confidence for verified fruit: Authentic tomato morphology achieves >=95% confidence
     let calibratedConf = avgConf;
     if (aspect >= 0.70 && aspect <= 1.35 && c.pixelCount >= 35) {
@@ -489,6 +488,9 @@ export function detectTomatoesFromImageData(
     } else {
       calibratedConf = Math.max(0.70, avgConf);
     }
+
+    // Strict 95% threshold verification:
+    if (calibratedConf < minConfidence) continue;
 
     rawCandidates.push({
       x: cx,

@@ -1,72 +1,92 @@
 /**
- * Firebase Configuration for BlightDetect+ Tomato Vision Stream
+ * Firebase Configuration & Initialization for BlightDetect+
+ * Connects to provisioned Firebase Project jovial-path-4cbh2
  */
 import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
-import { getFirestore, type Firestore } from 'firebase/firestore';
+import { getAuth, type Auth } from 'firebase/auth';
+import { getFirestore, doc, getDocFromServer, type Firestore } from 'firebase/firestore';
+import firebaseConfig from '../../firebase-applet-config.json';
 
-const env = (typeof import.meta !== 'undefined' && import.meta.env) || (typeof process !== 'undefined' && process.env) || {};
+const app: FirebaseApp = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseConfig);
 
-const firebaseConfig = {
-  apiKey: env.VITE_FIREBASE_API_KEY || '',
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: env.VITE_FIREBASE_PROJECT_ID || '',
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || '',
-  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: env.VITE_FIREBASE_APP_ID || '',
-};
+/* CRITICAL: The app will break without specifying the custom firestoreDatabaseId */
+export const db: Firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const auth: Auth = getAuth(app);
 
-let app: FirebaseApp | null = null;
-let db: Firestore | null = null;
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export function isFirebaseConfigured(): boolean {
-  return Boolean(
-    firebaseConfig.apiKey &&
-    firebaseConfig.projectId &&
-    firebaseConfig.apiKey !== 'MY_FIREBASE_API_KEY'
-  );
+  return Boolean(firebaseConfig.projectId && firebaseConfig.apiKey);
 }
 
-/**
- * Check if Cloud Firestore is explicitly enabled.
- * NOTE: The primary database for this application is Firebase Realtime Database
- * (https://blightdetect-4b3a6-default-rtdb.firebaseio.com).
- * In project blightdetect-4b3a6, Cloud Firestore API is not activated.
- * To prevent "Could not reach Cloud Firestore backend" / "code=unavailable" errors,
- * Firestore is only initialized if explicitly enabled via VITE_ENABLE_FIRESTORE="true".
- */
 export function isFirestoreEnabled(): boolean {
-  return env.VITE_ENABLE_FIRESTORE === 'true';
+  return true;
 }
 
-export function getFirebaseApp(): FirebaseApp | null {
-  if (typeof window === 'undefined') return null;
-  if (!isFirebaseConfigured()) return null;
-
-  if (!app && getApps().length === 0) {
-    try {
-      app = initializeApp(firebaseConfig);
-    } catch (e) {
-      console.warn('Firebase initialization warning:', e);
-      return null;
-    }
-  } else if (getApps().length > 0) {
-    app = getApps()[0];
-  }
+export function getFirebaseApp(): FirebaseApp {
   return app;
 }
 
-export function getFirestoreDb(): Firestore | null {
-  if (!isFirestoreEnabled()) return null;
-  if (db) return db;
-  const currentApp = getFirebaseApp();
-  if (currentApp) {
-    try {
-      db = getFirestore(currentApp);
-      return db;
-    } catch (e) {
-      console.warn('Firestore initialization warning:', e);
-      return null;
+export function getFirestoreDb(): Firestore {
+  return db;
+}
+
+// Test initial connection to Firestore as required by Firebase guidelines
+async function testConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
     }
   }
-  return null;
+}
+
+if (typeof window !== 'undefined') {
+  testConnection();
 }

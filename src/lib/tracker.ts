@@ -141,7 +141,7 @@ export class TomatoTracker {
       maxLostFrames: options.maxLostFrames ?? 3,
       virtualLineYRatio: options.virtualLineYRatio ?? 0.5,
       useCountingLine: options.useCountingLine ?? false,
-      minFramesToCount: options.minFramesToCount ?? 2,
+      minFramesToCount: options.minFramesToCount ?? 1,
     };
   }
 

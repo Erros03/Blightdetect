@@ -203,6 +203,27 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
         </div>
       </div>
 
+      {/* Quick link banner to standalone AI Advisory */}
+      <div className="flex items-center justify-between rounded-2xl border border-stone-200 dark:border-stone-800 bg-stone-900 text-white p-4 shadow-sm">
+        <div className="flex items-center space-x-3">
+          <div className="rounded-xl bg-emerald-500/20 p-2 text-emerald-400">
+            <Sparkles className="h-5 w-5" />
+          </div>
+          <div>
+            <h4 className="text-sm font-bold text-white">DA-CVRC Agricultural LLM Expert Moved</h4>
+            <p className="text-xs text-stone-300">
+              Access localized tomato disease advisory, real-time culling recommendations, and dataset exports on the dedicated AI Advisory page.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => onNavigate('ai-advisory')}
+          className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 transition-colors cursor-pointer shrink-0"
+        >
+          Open AI Advisory Page
+        </button>
+      </div>
+
       {/* Analytics & Performance Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Real-time Quality & Harvest Estimation */}
@@ -281,10 +302,7 @@ export const DashboardRoute: React.FC<DashboardRouteProps> = ({
                               {evt.size === 'small' ? 'Small' : evt.size === 'large' ? 'Large' : 'Medium'}
                             </span>
                             <span className="text-[10px] text-stone-600 dark:text-stone-300 font-mono font-semibold">
-                              ~{evt.diameterMm}mm
-                            </span>
-                            <span className="text-[10px] text-stone-500 dark:text-stone-400 font-mono">
-                              • {evt.weightGrams ?? (evt.size === 'small' ? 85 : evt.size === 'large' ? 200 : 140)}g
+                              ~{((evt.diameterMm || 65) / 10).toFixed(1)} cm
                             </span>
                           </div>
                         </td>

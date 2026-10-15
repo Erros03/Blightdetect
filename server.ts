@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
+import { generateGeminiDACVRCAdvisory, TelemetryPayload } from './src/lib/gemini-advisory.ts';
+import { getDACVRCDatasetJSONL, getDACVRCDatasetCSV, DACVRC_FINE_TUNING_DATASET } from './src/data/dacvrc_fine_tuning_dataset.ts';
 
 dotenv.config();
 
@@ -38,12 +40,32 @@ function normalizeTomatoClass(rawClass: string = ''): { displayName: string; cla
   return { displayName: 'Ripe Tomato', class_id: 0, ripeness: 'ripe' };
 }
 
-// Helper to normalize Roboflow model endpoint (strips full URL prefix, ensures /1 version)
+// Helper to normalize Roboflow model endpoint (strips full URL prefix, handles workspace & training run IDs)
 function resolveModelEndpoint(customEndpoint?: string): string {
-  let ep = (customEndpoint || process.env.ROBOFLOW_MODEL_ENDPOINT || 'tomato-fruit-ripeness-and-blight/1').trim();
+  let ep = (customEndpoint || process.env.ROBOFLOW_MODEL_ENDPOINT || 'tomato-defect-and-unripe-detect-kdhgn/2').trim();
   ep = ep.replace(/^https?:\/\/detect\.roboflow\.com\//i, '').trim();
+
+  // If input contains the non-existent sample project name, remap to user's real project
+  if (ep.includes('tomato-fruit-ripeness-and-blight')) {
+    ep = ep.replace('tomato-fruit-ripeness-and-blight', 'tomato-defect-and-unripe-detect-kdhgn');
+  }
+
+  // If input contains a workspace prefix (e.g. workspace_name/project...)
+  if (ep.includes('/')) {
+    const parts = ep.split('/');
+    if (parts.length >= 2 && (parts[0].includes('workspace') || parts[0].includes('-s-'))) {
+      ep = parts.slice(1).join('/');
+    }
+  }
+
+  // If input is formatted like project-2-yolo11n-t1 (extract project ID and version 2)
+  const modelRunMatch = ep.match(/^(.+?)-(\d+)-(?:yolo|rf|[a-z0-9]+-t\d+).*$/i);
+  if (modelRunMatch) {
+    ep = `${modelRunMatch[1]}/${modelRunMatch[2]}`;
+  }
+
   if (ep && !ep.includes('/')) {
-    ep = `${ep}/1`;
+    ep = `${ep}/2`;
   }
   return ep;
 }
@@ -198,9 +220,34 @@ app.post('/api/detect', async (req, res) => {
         let rawPredictions = data?.predictions || [];
         let usedEndpoint = modelEndpoint;
 
-        // If primary model returned 0 predictions and no custom endpoint was explicitly specified,
-        // attempt secondary model (tomato-defect-and-unripe-detect-kdhgn/1) to catch edge-case unripe fruit
-        if ((!rawPredictions || rawPredictions.length === 0) && !customEndpoint && modelEndpoint !== 'tomato-defect-and-unripe-detect-kdhgn/1') {
+        // If primary model returned 404 or 0 predictions, attempt known verified versions
+        if (!response.ok && response.status === 404) {
+          const fallbackEndpoints = [
+            'tomato-defect-and-unripe-detect-kdhgn/2',
+            'tomato-defect-and-unripe-detect-kdhgn/1',
+          ];
+          for (const fbEp of fallbackEndpoints) {
+            if (fbEp !== modelEndpoint) {
+              try {
+                const fbUrl = `https://detect.roboflow.com/${fbEp}?api_key=${roboflowKey}&confidence=${queryConfidence}&overlap=${overlap}&format=json`;
+                const fbRes = await fetch(fbUrl, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: base64Data,
+                });
+                if (fbRes.ok) {
+                  response = fbRes;
+                  data = await fbRes.json();
+                  rawPredictions = data?.predictions || [];
+                  usedEndpoint = fbEp;
+                  break;
+                }
+              } catch (_) {
+                // Try next
+              }
+            }
+          }
+        } else if ((!rawPredictions || rawPredictions.length === 0) && !customEndpoint && modelEndpoint !== 'tomato-defect-and-unripe-detect-kdhgn/1') {
           try {
             const fallbackUrl = `https://detect.roboflow.com/tomato-defect-and-unripe-detect-kdhgn/1?api_key=${roboflowKey}&confidence=${queryConfidence}&overlap=${overlap}&format=json`;
             const fallbackRes = await fetch(fallbackUrl, {
@@ -563,6 +610,57 @@ app.post('/api/evaluate-sample', async (req, res) => {
       analytics_notes: `Inference pipeline failure: ${err?.message || 'Internal error'}`,
     });
   }
+});
+
+// Domain-Specific Agricultural LLM Advisory Endpoint (DA-CVRC Gemini Flash Fine-Tuned Model)
+app.post('/api/advisory/generate', async (req, res) => {
+  try {
+    const telemetry: TelemetryPayload = {
+      totalProcessed: Number(req.body?.totalProcessed || 0),
+      ripeCount: Number(req.body?.ripeCount || 0),
+      unripeCount: Number(req.body?.unripeCount || 0),
+      blightCount: Number(req.body?.blightCount || 0),
+      blightInfectionRate: Number(req.body?.blightInfectionRate || 0),
+      gradeADistributionPct: Number(req.body?.gradeADistributionPct || 0),
+      gradeBDistributionPct: Number(req.body?.gradeBDistributionPct || 0),
+      gradeCDistributionPct: Number(req.body?.gradeCDistributionPct || 0),
+      avgDiameterMm: Number(req.body?.avgDiameterMm || 68),
+      topDefectType: req.body?.topDefectType || 'Early Blight (Alternaria solani)',
+      ambientTemperatureC: Number(req.body?.ambientTemperatureC || 28),
+      ambientHumidityRH: Number(req.body?.ambientHumidityRH || 80),
+    };
+
+    const advisory = await generateGeminiDACVRCAdvisory(telemetry);
+    return res.json({ status: 'success', advisory });
+  } catch (err: any) {
+    return res.status(500).json({
+      status: 'error',
+      message: err?.message || 'Failed to generate agricultural advisory',
+    });
+  }
+});
+
+// DA-CVRC Agricultural Q&A Fine-Tuning Dataset Endpoints for AI Studio / Vertex AI
+app.get('/api/llm/dataset.jsonl', (_req, res) => {
+  res.setHeader('Content-Type', 'application/jsonlines');
+  res.setHeader('Content-Disposition', 'attachment; filename="dacvrc_tomato_advisory_finetuning.jsonl"');
+  res.send(getDACVRCDatasetJSONL());
+});
+
+app.get('/api/llm/dataset.csv', (_req, res) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="dacvrc_tomato_advisory_finetuning.csv"');
+  res.send(getDACVRCDatasetCSV());
+});
+
+app.get('/api/llm/dataset', (_req, res) => {
+  res.json({
+    status: 'success',
+    count: DACVRC_FINE_TUNING_DATASET.length,
+    locale: 'Department of Agriculture – Cagayan Valley Research Center (DA-CVRC), City of Ilagan, Isabela',
+    entries: DACVRC_FINE_TUNING_DATASET,
+    formatsAvailable: ['jsonl', 'csv'],
+  });
 });
 
 // Vite & Static file serving setup

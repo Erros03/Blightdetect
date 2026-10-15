@@ -25,9 +25,9 @@ interface RoboflowDiagnosticModalProps {
   onConfidenceChange: (val: number) => void;
   currentEndpoint: string;
   onEndpointChange: (endpoint: string) => void;
-  opticalFallbackEnabled: boolean;
-  onOpticalFallbackToggle: (enabled: boolean) => void;
-  getCurrentFrameBase64: () => string | null;
+  opticalFallbackEnabled?: boolean;
+  onOpticalFallbackToggle?: (enabled: boolean) => void;
+  getCurrentFrameBase64?: () => string | null;
 }
 
 export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = ({
@@ -37,7 +37,7 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
   onConfidenceChange,
   currentEndpoint,
   onEndpointChange,
-  opticalFallbackEnabled,
+  opticalFallbackEnabled = true,
   onOpticalFallbackToggle,
   getCurrentFrameBase64,
 }) => {
@@ -80,9 +80,14 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
   if (!isOpen) return null;
 
   const handleRunTest = async () => {
-    const base64 = getCurrentFrameBase64();
+    const base64 = typeof getCurrentFrameBase64 === 'function' ? getCurrentFrameBase64() : null;
     if (!base64) {
-      alert('Camera is not currently active. Start the camera stream first to test a live frame.');
+      setTestResult({
+        predictions: [],
+        inferenceTimeMs: 0,
+        source: 'error',
+        error: 'Camera is not currently active. Please start the camera stream first to capture and test a live frame.',
+      });
       return;
     }
 
@@ -113,8 +118,23 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
 
   const handleSaveEndpoint = () => {
     let clean = endpointInput.trim().replace(/^https?:\/\/detect\.roboflow\.com\//i, '');
+
+    // Strip workspace prefix if present (e.g. furigay-erros-maverick-s-workspace/...)
+    if (clean.includes('/')) {
+      const parts = clean.split('/');
+      if (parts.length >= 2 && (parts[0].includes('workspace') || parts[0].includes('-s-'))) {
+        clean = parts.slice(1).join('/');
+      }
+    }
+
+    // Auto-clean model run ID format: project-2-yolo11n-t1 -> project/2
+    const modelRunMatch = clean.match(/^(.+?)-(\d+)-(?:yolo|rf|[a-z0-9]+-t\d+).*$/i);
+    if (modelRunMatch) {
+      clean = `${modelRunMatch[1]}/${modelRunMatch[2]}`;
+    }
+
     if (clean && !clean.includes('/')) {
-      clean = `${clean}/1`;
+      clean = `${clean}/2`;
     }
     setEndpointInput(clean);
     onEndpointChange(clean);
@@ -345,7 +365,7 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
                     type="text"
                     value={endpointInput}
                     onChange={(e) => setEndpointInput(e.target.value)}
-                    placeholder="tomato-fruit-ripeness-and-blight/1"
+                    placeholder="tomato-defect-and-unripe-detect-kdhgn/2"
                     className="flex-1 rounded-lg bg-stone-900 border border-stone-700 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-red-500"
                   />
                   <button
@@ -360,16 +380,16 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
                   <button
                     type="button"
                     onClick={() => {
-                      setEndpointInput('tomato-fruit-ripeness-and-blight/1');
-                      onEndpointChange('tomato-fruit-ripeness-and-blight/1');
+                      setEndpointInput('tomato-defect-and-unripe-detect-kdhgn/2');
+                      onEndpointChange('tomato-defect-and-unripe-detect-kdhgn/2');
                     }}
                     className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
-                      currentEndpoint.includes('tomato-fruit-ripeness-and-blight')
+                      currentEndpoint.includes('tomato-defect-and-unripe-detect-kdhgn/2')
                         ? 'border-emerald-500/80 bg-emerald-950/60 text-emerald-300 font-bold'
                         : 'border-stone-800 bg-stone-900/80 text-stone-400 hover:text-stone-200'
                     }`}
                   >
-                    🍅 Ripeness & Blight Model (Default)
+                    🍅 Version 2 (Latest YOLO11 Dataset)
                   </button>
                   <button
                     type="button"
@@ -378,16 +398,16 @@ export const RoboflowDiagnosticModal: React.FC<RoboflowDiagnosticModalProps> = (
                       onEndpointChange('tomato-defect-and-unripe-detect-kdhgn/1');
                     }}
                     className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
-                      currentEndpoint.includes('tomato-defect-and-unripe-detect-kdhgn')
+                      currentEndpoint.includes('tomato-defect-and-unripe-detect-kdhgn/1')
                         ? 'border-emerald-500/80 bg-emerald-950/60 text-emerald-300 font-bold'
                         : 'border-stone-800 bg-stone-900/80 text-stone-400 hover:text-stone-200'
                     }`}
                   >
-                    🌱 Unripe & Defect Model
+                    🌱 Version 1 (Base Model)
                   </button>
                 </div>
                 <p className="text-[11px] text-stone-500">
-                  Tip: Always include the version number like <code>/1</code>. If omitted, the system will automatically append <code>/1</code>.
+                  Tip: Always include the version number like <code>/2</code> or <code>/1</code>.
                 </p>
               </div>
 

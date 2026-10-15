@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "DetectionSession": {
+      "title": "DetectionSession",
+      "description": "A tomato conveyor processing session capturing yield aggregates and statistics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 32 },
+        "startTime": { "type": "string", "maxLength": 32 },
+        "endTime": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "number" },
+        "endedAt": { "type": "number" },
+        "durationSeconds": { "type": "number" },
+        "ripeCount": { "type": "number" },
+        "unripeCount": { "type": "number" },
+        "blightCount": { "type": "number" },
+        "totalCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "paused", "completed"] },
+        "blightPercentage": { "type": "number" },
+        "averageConfidence": { "type": "number" }
+      },
+      "required": ["id", "date", "startTime", "createdAt", "status", "totalCount"]
+    },
+    "TomatoDetectionEvent": {
+      "title": "TomatoDetectionEvent",
+      "description": "An individual counted tomato detected on conveyor with classification, size, and weight",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "timestamp": { "type": "number" },
+        "class": { "type": "string", "maxLength": 64 },
+        "ripeness": { "type": "string", "enum": ["ripe", "unripe", "blight"] },
+        "confidence": { "type": "number" },
+        "size": { "type": "string", "enum": ["small", "medium", "large"] },
+        "diameterMm": { "type": "number" },
+        "weightGrams": { "type": "number" },
+        "weightOz": { "type": "number" },
+        "trackId": { "type": "number" }
+      },
+      "required": ["id", "sessionId", "timestamp", "class", "ripeness", "confidence", "size", "diameterMm"]
+    }
+  },
+  "firestore": {
+    "/detection_sessions/{sessionId}": {
+      "schema": "DetectionSession",
+      "description": "Conveyor detection sessions capturing harvest batches"
+    },
+    "/detections/{detectionId}": {
+      "schema": "TomatoDetectionEvent",
+      "description": "Individual tomato optical detection and sizing records"
+    }
+  }
+}

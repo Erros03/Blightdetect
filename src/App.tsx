@@ -7,7 +7,7 @@ import { DashboardRoute } from './routes/index.tsx';
 import { LiveStreamRoute } from './routes/live-stream.tsx';
 import { HistoryRoute } from './routes/history.tsx';
 import { YieldMonitoringRoute } from './routes/yield-monitoring.tsx';
-import { ArduinoConnectorModal } from './components/ArduinoConnectorModal.tsx';
+import { AIAdvisoryRoute } from './routes/ai-advisory.tsx';
 import { FirebaseDatabaseModal } from './components/FirebaseDatabaseModal.tsx';
 import { useDetectionSession } from './hooks/useDetectionSession.ts';
 import { ThemeProvider } from './context/ThemeContext.tsx';
@@ -16,7 +16,6 @@ import type { CameraStatus } from './types.ts';
 function AppContent() {
   const [currentRoute, setCurrentRoute] = useState<string>('dashboard');
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('off');
-  const [isArduinoModalOpen, setIsArduinoModalOpen] = useState<boolean>(false);
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState<boolean>(false);
 
   const {
@@ -32,7 +31,7 @@ function AppContent() {
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.replace('#', '').trim();
-      if (['dashboard', 'live-stream', 'yield-monitoring', 'history'].includes(hash)) {
+      if (['dashboard', 'live-stream', 'yield-monitoring', 'ai-advisory', 'history'].includes(hash)) {
         setCurrentRoute(hash);
       }
     };
@@ -71,7 +70,6 @@ function AppContent() {
         onNavigate={handleNavigate}
         cameraStatus={cameraStatus}
         sessionCounts={counts}
-        onOpenArduinoModal={() => setIsArduinoModalOpen(true)}
       />
 
       {/* Main Content View Container */}
@@ -98,7 +96,6 @@ function AppContent() {
             onStopCamera={handleStopCamera}
             onStartCamera={handleStartCamera}
             onNavigate={handleNavigate}
-            onOpenArduinoModal={() => setIsArduinoModalOpen(true)}
           />
         )}
 
@@ -109,14 +106,15 @@ function AppContent() {
           />
         )}
 
+        {currentRoute === 'ai-advisory' && (
+          <AIAdvisoryRoute
+            currentCounts={counts}
+            liveEvents={recentEvents}
+          />
+        )}
+
         {currentRoute === 'history' && <HistoryRoute />}
       </main>
-
-      {/* Arduino & IoT Size Sorter Modal */}
-      <ArduinoConnectorModal
-        isOpen={isArduinoModalOpen}
-        onClose={() => setIsArduinoModalOpen(false)}
-      />
 
       {/* Firebase Realtime Database Inspector Modal */}
       <FirebaseDatabaseModal

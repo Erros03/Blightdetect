@@ -1,7 +1,7 @@
 /**
  * Live Stream Route - Continuous Real-Time Tomato & Blight Detector
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { RoboflowDetector } from '../components/RoboflowDetector.tsx';
 import type {
   CameraStatus,
@@ -18,9 +18,43 @@ import {
   ArrowRight,
   AlertTriangle,
   Award,
-  Cpu,
+  Usb,
+  Send,
+  AlertCircle,
+  ExternalLink,
+  Terminal,
+  ChevronDown,
+  ChevronUp,
+  Trash2,
+  HelpCircle,
+  Play,
+  Square,
+  Pause,
+  RotateCcw,
+  Sliders,
+  Eye,
+  Zap,
 } from 'lucide-react';
-import { arduinoSerial } from '../lib/arduino-serial.ts';
+import {
+  connectSerial,
+  disconnectSerial,
+  subscribeSerial,
+  sendCommand,
+  enableSimulationMode,
+  isSerialSupported,
+  isRunningInIframe,
+  clearSerialLogs,
+  startConveyor,
+  stopConveyor,
+  pauseConveyor,
+  resumeConveyor,
+  resetSystem,
+  testServo,
+  toggleMotorInversion,
+  testMotorFwd,
+  testMotorRev,
+  type SerialStatus,
+} from '../lib/arduino.ts';
 
 interface LiveStreamRouteProps {
   session: DetectionSession | null;
@@ -32,7 +66,6 @@ interface LiveStreamRouteProps {
   onStopCamera: () => void;
   onStartCamera: () => void;
   onNavigate: (route: string) => void;
-  onOpenArduinoModal?: () => void;
 }
 
 export const LiveStreamRoute: React.FC<LiveStreamRouteProps> = ({
@@ -45,7 +78,6 @@ export const LiveStreamRoute: React.FC<LiveStreamRouteProps> = ({
   onStopCamera,
   onStartCamera,
   onNavigate,
-  onOpenArduinoModal,
 }) => {
   const [lowLightConfig, setLowLightConfig] = useState<LowLightFilterConfig>({
     enabled: false,
@@ -56,47 +88,381 @@ export const LiveStreamRoute: React.FC<LiveStreamRouteProps> = ({
     autoGain: false,
   });
 
+  const [serialStatus, setSerialStatus] = useState<SerialStatus>({
+    isConnected: false,
+    isSimulated: false,
+    lastCommand: null,
+    error: null,
+    logs: [],
+  });
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [testSent, setTestSent] = useState<string | null>(null);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+  const supported = isSerialSupported();
+
+  useEffect(() => {
+    return subscribeSerial((status) => {
+      setSerialStatus(status);
+      if (status.isConnected && status.logs.length > 0) {
+        setIsTerminalOpen(true);
+      }
+    });
+  }, []);
+
+  const handleToggleConnect = async () => {
+    if (serialStatus.isConnected) {
+      await disconnectSerial();
+    } else {
+      setIsConnecting(true);
+      await connectSerial();
+      setIsConnecting(false);
+    }
+  };
+
+  const handleManualTest = async (cmd: string) => {
+    setTestSent(cmd);
+    await sendCommand(cmd);
+    setTimeout(() => setTestSent(null), 1200);
+  };
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 space-y-6">
-      {/* Arduino Hardware Quick Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 shadow-xs text-xs">
+      {/* Arduino Web Serial Status & Connection Toolbar */}
+      <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 p-4 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors">
         <div className="flex items-center space-x-3">
-          <div className={`p-2 rounded-xl ${arduinoSerial.getConnected() ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400' : 'bg-stone-100 dark:bg-stone-800 text-stone-500'}`}>
-            <Cpu className="h-4 w-4" />
+          <div
+            className={`p-2.5 rounded-xl ${
+              serialStatus.isConnected
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400'
+                : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
+            }`}
+          >
+            <Usb className="h-5 w-5" />
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <span className="font-bold text-stone-900 dark:text-stone-100">
-                Arduino Physical Size Sorter
-              </span>
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                arduinoSerial.getConnected()
-                  ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700'
-                  : 'bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-400'
-              }`}>
-                <span className={`h-1.5 w-1.5 rounded-full mr-1.5 ${arduinoSerial.getConnected() ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
-                {arduinoSerial.getConnected() ? 'USB Connected (9600 Baud)' : 'Disconnected (Simulation Mode Active)'}
+              <span className="text-sm font-bold text-stone-900 dark:text-white">
+                Arduino USB Serial
               </span>
             </div>
-            <p className="text-[11px] text-stone-500 dark:text-stone-400">
-              Small: 30° (&lt;60mm) • Medium: 90° (60-75mm / 110-170g) • Large: 150° (&gt;75mm) • Reject: 180°
-            </p>
+            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+              <span
+                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                  serialStatus.isConnected
+                    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                    : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400 border border-stone-200 dark:border-stone-700'
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full mr-1.5 ${
+                    serialStatus.isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'
+                  }`}
+                />
+                {serialStatus.isConnected
+                  ? serialStatus.isSimulated
+                    ? 'Simulated Serial'
+                    : 'USB Connected (9600 Baud)'
+                  : 'Disconnected'}
+              </span>
+
+              {/* Conveyor State Badge */}
+              {serialStatus.isConnected && (
+                <span
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                    serialStatus.conveyorState === 'RUNNING'
+                      ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
+                      : serialStatus.conveyorState === 'SORTING_ACTIVE'
+                      ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border-purple-300 dark:border-purple-700 animate-pulse'
+                      : serialStatus.conveyorState === 'WAITING_POSITION'
+                      ? 'bg-blue-50 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                      : serialStatus.conveyorState === 'PAUSED'
+                      ? 'bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                      : 'bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300 border-stone-200 dark:border-stone-700'
+                  }`}
+                >
+                  Conveyor: {serialStatus.conveyorState}
+                  {serialStatus.activeSortingArm && ` (${serialStatus.activeSortingArm})`}
+                </span>
+              )}
+
+              {/* IR Sensor Trigger indicator */}
+              {serialStatus.lastIrDetectedTime && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono bg-blue-50 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                  IR Beam: {serialStatus.lastIrDetectedTime}
+                </span>
+              )}
+            </div>
+
+            <div className="text-xs text-stone-500 dark:text-stone-400 mt-1 flex flex-wrap items-center gap-x-2">
+              <span>Thesis Prototype:</span>
+              <span className="font-mono text-[11px] text-stone-700 dark:text-stone-300">
+                12V Motor (D5 PWM) • 6 Servos (D9/10/11/6/7/12) • IR (D2)
+              </span>
+              {serialStatus.lastCommand && (
+                <span className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400 font-bold">
+                  (TX: &apos;{serialStatus.lastCommand}&apos;)
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center space-x-2">
-          {onOpenArduinoModal && (
+        {/* Action Buttons & Manual Triggers */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Master Conveyor Motor Controls when connected */}
+          {serialStatus.isConnected && (
+            <div className="flex items-center space-x-1.5 border-r border-stone-200 dark:border-stone-800 pr-2 mr-1">
+              <span className="text-[11px] text-stone-400 font-bold mr-0.5">Motor:</span>
+              <button
+                onClick={() => startConveyor()}
+                className={`px-2.5 py-1 text-xs font-bold rounded-lg flex items-center space-x-1 transition-all cursor-pointer ${
+                  serialStatus.conveyorState === 'RUNNING'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-200 border border-emerald-300 dark:border-emerald-700'
+                }`}
+                title="Start 12V Conveyor Motor (START command)"
+              >
+                <Play className="h-3 w-3 fill-current" />
+                <span>Start</span>
+              </button>
+              <button
+                onClick={() => stopConveyor()}
+                className={`px-2.5 py-1 text-xs font-bold rounded-lg flex items-center space-x-1 transition-all cursor-pointer ${
+                  serialStatus.conveyorState === 'STOPPED'
+                    ? 'bg-red-600 text-white shadow-xs'
+                    : 'bg-red-100 dark:bg-red-950/80 text-red-800 dark:text-red-300 hover:bg-red-200 border border-red-300 dark:border-red-700'
+                }`}
+                title="Stop Conveyor Motor (STOP command)"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                <span>Stop</span>
+              </button>
+              <button
+                onClick={() => (serialStatus.conveyorState === 'PAUSED' ? resumeConveyor() : pauseConveyor())}
+                className="px-2 py-1 text-xs rounded-lg bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 border border-stone-200 dark:border-stone-700 transition-all cursor-pointer"
+                title="Pause/Resume Conveyor Motor"
+              >
+                <Pause className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => resetSystem()}
+                className="px-2 py-1 text-xs rounded-lg bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-300 border border-stone-200 dark:border-stone-700 transition-all cursor-pointer"
+                title="Reset Conveyor and Servos to Home (RESET command)"
+              >
+                <RotateCcw className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => toggleMotorInversion()}
+                className={`px-2 py-1 text-[11px] font-mono rounded-lg border transition-all cursor-pointer flex items-center space-x-1 ${
+                  serialStatus.isMotorInverted
+                    ? 'bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700 font-bold'
+                    : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400 border-stone-200 dark:border-stone-700'
+                }`}
+                title={
+                  serialStatus.isMotorInverted
+                    ? 'Motor logic is INVERTED (Start ⮂ Stop swapped for Active-LOW / inverted driver). Click to toggle.'
+                    : 'Motor logic is NORMAL. Click to invert.'
+                }
+              >
+                <Zap className="h-3 w-3" />
+                <span>{serialStatus.isMotorInverted ? 'Inverted' : 'Normal'}</span>
+              </button>
+              <button
+                onClick={() => testMotorFwd()}
+                className="px-2 py-1 text-[11px] font-mono rounded-lg bg-blue-100 dark:bg-blue-950/80 text-blue-800 dark:text-blue-300 border border-blue-300 dark:border-blue-700 hover:bg-blue-200 transition-all cursor-pointer font-bold"
+                title="Force Motor Forward at PWM 160 speed"
+              >
+                Fwd 160
+              </button>
+              <button
+                onClick={() => testMotorRev()}
+                className="px-2 py-1 text-[11px] font-mono rounded-lg bg-blue-100 dark:bg-blue-950/80 text-blue-800 dark:text-blue-300 border border-blue-300 dark:border-blue-700 hover:bg-blue-200 transition-all cursor-pointer font-bold"
+                title="Force Motor Reverse at PWM 160 speed"
+              >
+                Rev 160
+              </button>
+            </div>
+          )}
+
+          {/* Quick Manual Test Triggers for 4 Servos */}
+          {serialStatus.isConnected && (
+            <div className="flex items-center space-x-1 border-r border-stone-200 dark:border-stone-800 pr-2 mr-1">
+              <span className="text-[11px] text-stone-400 mr-1">Servos:</span>
+              {[
+                { label: 'S1: Unripe (D9)', cmd: 'UNRIPE' },
+                { label: 'S2: Small (D10)', cmd: 'SMALL' },
+                { label: 'S3: Med (D11)', cmd: 'MEDIUM' },
+                { label: 'S4: Large (D6)', cmd: 'LARGE' },
+              ].map(({ label, cmd }) => (
+                <button
+                  key={cmd}
+                  onClick={() => testServo(cmd)}
+                  className={`px-1.5 py-1 text-[11px] font-mono rounded-lg border transition-all cursor-pointer ${
+                    serialStatus.activeSortingArm?.includes(cmd)
+                      ? 'bg-purple-600 text-white border-purple-600 scale-95 animate-pulse'
+                      : 'bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300 border-stone-200 dark:border-stone-700 hover:bg-stone-200 dark:hover:bg-stone-700'
+                  }`}
+                  title={`Test ${label} servo arm diverter (TEST_${cmd} command)`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Toggle Live Terminal */}
+          <button
+            onClick={() => setIsTerminalOpen(!isTerminalOpen)}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-colors cursor-pointer border ${
+              isTerminalOpen
+                ? 'bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 border-transparent'
+                : 'bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300 border-stone-200 dark:border-stone-700 hover:bg-stone-200 dark:hover:bg-stone-700'
+            }`}
+            title="Toggle Live Serial RX/TX terminal feed"
+          >
+            <Terminal className="h-3.5 w-3.5 text-emerald-500" />
+            <span>Terminal</span>
+            {serialStatus.logs.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-mono">
+                {serialStatus.logs.length}
+              </span>
+            )}
+            {isTerminalOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </button>
+
+          {/* If in iframe, offer 1-click standalone launch for USB permission */}
+          {isInIframe && !serialStatus.isConnected && (
             <button
-              id="btn-open-arduino-sorter-controls"
-              onClick={onOpenArduinoModal}
-              className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl font-bold bg-stone-900 text-white hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white shadow-xs transition-colors cursor-pointer"
+              onClick={() => window.open(window.location.href, '_blank')}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
+              title="Open app in a top-level browser tab so Chrome grants full USB serial access"
             >
-              <Cpu className="h-3.5 w-3.5" />
-              <span>{arduinoSerial.getConnected() ? 'Configure Sorter' : 'Connect Arduino USB'}</span>
+              <ExternalLink className="h-4 w-4" />
+              <span>Launch Standalone Tab</span>
             </button>
           )}
+
+          {/* Connect / Disconnect Button */}
+          <button
+            id="btn-connect-serial"
+            onClick={handleToggleConnect}
+            disabled={isConnecting}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer disabled:opacity-50 ${
+              serialStatus.isConnected
+                ? 'bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/60 dark:text-red-400 dark:hover:bg-red-950 border border-red-200 dark:border-red-900/60'
+                : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
+            }`}
+          >
+            <Usb className="h-4 w-4" />
+            <span>
+              {isConnecting
+                ? 'Requesting Port...'
+                : serialStatus.isConnected
+                ? serialStatus.isSimulated
+                  ? 'Exit Simulation'
+                  : 'Disconnect Arduino'
+                : 'Connect Arduino (USB)'}
+            </span>
+          </button>
         </div>
       </div>
+
+      {/* Collapsible Live Serial Monitor */}
+      {isTerminalOpen && (
+        <div className="rounded-2xl border border-stone-800 bg-stone-950 p-4 shadow-md font-mono text-xs text-stone-300 animate-fadeIn">
+          <div className="flex items-center justify-between pb-3 mb-3 border-b border-stone-800">
+            <div className="flex items-center space-x-2">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="font-bold text-white text-xs">Live Serial Monitor (9600 Baud)</span>
+              <span className="text-[11px] text-stone-500">
+                {serialStatus.isConnected ? (serialStatus.isSimulated ? '(Simulation Mode)' : '(Live USB Port)') : '(Offline)'}
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => clearSerialLogs()}
+                className="px-2.5 py-1 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-400 hover:text-stone-200 text-[11px] flex items-center space-x-1 transition-colors cursor-pointer"
+                title="Clear terminal log"
+              >
+                <Trash2 className="h-3 w-3" />
+                <span>Clear</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="max-h-48 overflow-y-auto space-y-1 text-[11px] scrollbar-thin">
+            {serialStatus.logs.length === 0 ? (
+              <div className="text-stone-500 py-3 text-center italic">
+                No serial events logged yet. Click &apos;Connect Arduino&apos; or press test buttons above.
+              </div>
+            ) : (
+              serialStatus.logs.map((log) => (
+                <div key={log.id} className="flex items-start space-x-2 font-mono leading-relaxed">
+                  <span className="text-stone-500 text-[10px] select-none shrink-0">{log.timestamp}</span>
+                  <span
+                    className={`px-1 rounded text-[10px] font-bold shrink-0 ${
+                      log.type === 'tx'
+                        ? 'bg-blue-950 text-blue-400 border border-blue-800/60'
+                        : log.type === 'rx'
+                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
+                        : log.type === 'err'
+                        ? 'bg-red-950 text-red-400 border border-red-800/60'
+                        : 'bg-stone-800 text-stone-400'
+                    }`}
+                  >
+                    {log.type.toUpperCase()}
+                  </span>
+                  <span
+                    className={`${
+                      log.type === 'tx'
+                        ? 'text-blue-300 font-semibold'
+                        : log.type === 'rx'
+                        ? 'text-emerald-300 font-bold'
+                        : log.type === 'err'
+                        ? 'text-red-400'
+                        : 'text-stone-300'
+                    }`}
+                  >
+                    {log.message}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Security or Connection Notice if needed */}
+      {serialStatus.error && (
+        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start space-x-2.5">
+            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-semibold">{serialStatus.error}</p>
+              <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                Opening in a standalone browser tab bypasses iframe restrictions and gives Chrome direct access to your USB port.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={() => enableSimulationMode()}
+              className="px-3 py-1.5 rounded-xl bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-200 font-semibold text-xs transition-colors cursor-pointer"
+            >
+              Use Simulation Mode
+            </button>
+            <button
+              onClick={() => window.open(window.location.href, '_blank')}
+              className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs flex items-center space-x-1.5 shadow-sm transition-colors cursor-pointer"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span>Open in Full Tab for Real USB</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Real-time Detector Main Component */}
       <RoboflowDetector
@@ -199,10 +565,7 @@ export const LiveStreamRoute: React.FC<LiveStreamRouteProps> = ({
                               {evt.size === 'small' ? 'Small' : evt.size === 'large' ? 'Large' : 'Medium'}
                             </span>
                             <span className="text-[10px] text-stone-700 dark:text-stone-300 font-mono mt-0.5 font-semibold">
-                              ~{evt.diameterMm || 65}mm ({((evt.diameterMm || 65) / 25.4).toFixed(1)}")
-                            </span>
-                            <span className="text-[10px] text-stone-500 dark:text-stone-400 font-mono">
-                              {evt.weightGrams ?? (evt.size === 'small' ? 85 : evt.size === 'large' ? 200 : 140)}g ({evt.weightOz ?? (evt.size === 'small' ? '3.0' : evt.size === 'large' ? '7.1' : '4.9')} oz)
+                              ~{((evt.diameterMm || 65) / 10).toFixed(1)} cm
                             </span>
                           </div>
                         </td>
@@ -242,32 +605,6 @@ export const LiveStreamRoute: React.FC<LiveStreamRouteProps> = ({
 
         {/* Right Col: Conveyor Quality Summary */}
         <div className="space-y-4">
-          {/* Arduino Hardware Actuator Quick Status */}
-          {onOpenArduinoModal && (
-            <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900/90 p-4 shadow-xs flex items-center justify-between transition-colors">
-              <div className="flex items-center space-x-3">
-                <div className={`p-2.5 rounded-xl ${arduinoSerial.getConnected() ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-600 dark:text-emerald-400' : 'bg-stone-100 dark:bg-stone-800 text-stone-500'}`}>
-                  <Cpu className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="text-xs font-bold text-stone-900 dark:text-white flex items-center gap-1.5">
-                    Arduino Size Sorter
-                    <span className={`h-1.5 w-1.5 rounded-full ${arduinoSerial.getConnected() ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'}`} />
-                  </div>
-                  <div className="text-[11px] text-stone-500 dark:text-stone-400">
-                    {arduinoSerial.getConnected() ? 'Connected • Auto-Gating Active' : 'Offline • Simulation Mode'}
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={onOpenArduinoModal}
-                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-stone-800 dark:text-stone-200 border border-stone-200 dark:border-stone-700/60 transition-colors cursor-pointer"
-              >
-                Configure
-              </button>
-            </div>
-          )}
-
           <div className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900/90 p-5 shadow-xs transition-colors">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-bold uppercase tracking-wider text-stone-900 dark:text-white">

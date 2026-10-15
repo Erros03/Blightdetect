@@ -446,7 +446,7 @@ export const FirebaseDatabaseModal: React.FC<FirebaseDatabaseModalProps> = ({
                       </td>
                       <td className="px-3 py-2 text-stone-200">{rec.ripeness}</td>
                       <td className="px-3 py-2 text-amber-400">{rec.confidence}%</td>
-                      <td className="px-3 py-2 text-blue-400">{rec.diameterMm || 60} mm</td>
+                      <td className="px-3 py-2 text-blue-400">{((rec.diameterMm || 60) / 10).toFixed(1)} cm</td>
                       <td className="px-3 py-2 text-stone-300">{rec.size || 'Medium'}</td>
                       <td className="px-3 py-2 text-stone-500">
                         {new Date(rec.timestamp).toLocaleTimeString()}
